@@ -113,7 +113,7 @@ def test_concurrent_engines_no_deadlock(engine):
             with engine.connect() as conn:
                 for _ in range(queries_per_thread):
                     conn.execute(text("SELECT 1")).fetchone()
-        except BaseException as e:  # noqa: BLE001 — propagate to assertion
+        except BaseException as e:
             errors.append(e)
 
     threads = [threading.Thread(target=worker) for _ in range(n_threads)]

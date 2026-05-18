@@ -15,11 +15,11 @@ import pytest
 pytestmark = pytest.mark.fuzz
 
 hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import HealthCheck, given, settings, strategies as st  # noqa: E402
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from chdb_sqlalchemy.exc import ChdbTypeNotSupportedError
 from chdb_sqlalchemy.types.parser import parse_type
-
 
 # Realistic base type vocabulary the parser must accept.
 _BASE_TYPES = [

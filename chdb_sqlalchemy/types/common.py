@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import copy
 import decimal as _decimal
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy import types
-
 
 # ---------------------------------------------------------------------------
 # Numeric coercion helpers
@@ -47,7 +47,7 @@ from sqlalchemy import types
 
 
 def _coerce_int(value: Any) -> Any:
-    if value is None or isinstance(value, int) and not isinstance(value, bool):
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
         return value
     if isinstance(value, str):
         return int(value)

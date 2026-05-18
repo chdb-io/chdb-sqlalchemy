@@ -11,8 +11,7 @@ Skipped automatically when chDB is not importable (see ``conftest.py``).
 
 from __future__ import annotations
 
-import pytest
-from sqlalchemy import MetaData, Table, inspect, text
+from sqlalchemy import inspect, text
 
 
 def test_engine_select_one(engine):

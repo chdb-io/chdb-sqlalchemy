@@ -20,6 +20,8 @@ import pytest
 
 from chdb_sqlalchemy.exc import ChdbTypeNotSupportedError
 from chdb_sqlalchemy.types import (
+    JSON,
+    UUID,
     Array,
     BFloat16,
     Boolean,
@@ -36,7 +38,6 @@ from chdb_sqlalchemy.types import (
     Int8,
     Int32,
     Int64,
-    JSON,
     LowCardinality,
     Map,
     MultiPolygon,
@@ -49,11 +50,9 @@ from chdb_sqlalchemy.types import (
     Tuple,
     UInt16,
     UInt64,
-    UUID,
     Variant,
 )
 from chdb_sqlalchemy.types.parser import parse_column_type, parse_type
-
 
 # ---------------------------------------------------------------------------
 # Scalars

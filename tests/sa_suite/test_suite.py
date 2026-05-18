@@ -25,4 +25,4 @@ registry.register("chdb", "chdb_sqlalchemy.dialect", "ChdbDialect")
 
 # Pull in every test class defined in the SA testing suite. These will be
 # collected by pytest exactly as if they were defined here.
-from sqlalchemy.testing.suite import *  # noqa: F401, F403, E402
+from sqlalchemy.testing.suite import *  # noqa: F403

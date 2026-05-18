@@ -19,7 +19,7 @@ pytest_plugins = ["sqlalchemy.testing.plugin.pytestplugin"]
 # Re-register the dialect here too because the parent conftest's
 # registration may not have fired yet by the time the SA plugin's
 # session-start hook tries to resolve the URL.
-from sqlalchemy.dialects import registry  # noqa: E402
+from sqlalchemy.dialects import registry
 
 registry.register("chdb", "chdb_sqlalchemy.dialect", "ChdbDialect")
 registry.register("chdb.dbapi", "chdb_sqlalchemy.dialect", "ChdbDialect")

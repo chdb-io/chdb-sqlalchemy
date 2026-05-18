@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class ChdbReflection:
     """Pulls schema metadata out of chDB's ``system.*`` tables."""
 
-    def __init__(self, dialect: "ChdbDialect") -> None:
+    def __init__(self, dialect: ChdbDialect) -> None:
         self.dialect = dialect
 
     # ------------------------------------------------------------------
