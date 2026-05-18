@@ -26,8 +26,8 @@ Everything else is implementation detail.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from sqlalchemy import types as sa_types
 

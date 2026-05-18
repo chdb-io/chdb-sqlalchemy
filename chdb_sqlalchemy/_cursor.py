@@ -31,7 +31,8 @@ from __future__ import annotations
 import ast
 import decimal as _decimal
 import json
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 # Type-string prefix → row converter.
 # Order matters: more specific prefixes must come before broader ones.
@@ -157,7 +158,7 @@ class _CursorWrapper:
     Delegates everything except ``fetch*`` to the underlying cursor.
     """
 
-    __slots__ = ("_cur", "_converters")
+    __slots__ = ("_converters", "_cur")
 
     def __init__(self, cursor: Any) -> None:
         self._cur = cursor

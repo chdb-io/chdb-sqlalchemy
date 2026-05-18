@@ -22,13 +22,10 @@ all differential tests skip cleanly.
 
 from __future__ import annotations
 
-import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CLICKHOUSE_BIN = REPO_ROOT / "clickhouse"
@@ -39,7 +36,7 @@ def _have_clickhouse_binary() -> bool:
 
 
 @pytest.fixture(scope="session")
-def clickhouse_local() -> "ClickHouseLocal":
+def clickhouse_local() -> ClickHouseLocal:
     """Subprocess-backed reference ClickHouse 26.3.9.8-lts.
 
     Returns a callable wrapper that runs ``clickhouse local --query``

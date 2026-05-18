@@ -21,7 +21,7 @@ This file catches 70% of "wrong-schema" bugs without an API call.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect
 
 from . import schemas
 

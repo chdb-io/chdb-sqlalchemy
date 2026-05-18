@@ -46,8 +46,8 @@ def llm():
 @pytest.fixture
 def toolkit(engine, llm):
     pytest.importorskip("langchain_community")
-    from langchain_community.utilities import SQLDatabase
     from langchain_community.agent_toolkits import SQLDatabaseToolkit
+    from langchain_community.utilities import SQLDatabase
 
     db = SQLDatabase(engine)
     return SQLDatabaseToolkit(db=db, llm=llm)

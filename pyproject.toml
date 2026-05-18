@@ -92,7 +92,16 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]
+ignore = [
+    "E501",   # line too long — handled by formatter, not lint
+    "E402",   # module-level import not at top — conftest needs env load first
+    "B905",   # zip without strict — over-pedantic for alpha
+    "RUF001", # ambiguous unicode in string — em-dashes are intentional
+    "RUF002", # ambiguous unicode in docstring — em-dashes are intentional
+    "RUF022", # __all__ unsorted — semantic groupings preferred
+    "SIM101", # merge isinstance calls — explicit branches are more readable in tests
+    "F811",   # redefined while unused — TypeCompiler overrides SA generic visitors
+]
 
 [tool.mypy]
 python_version = "3.10"

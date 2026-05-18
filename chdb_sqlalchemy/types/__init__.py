@@ -9,6 +9,7 @@ the type names with SQLAlchemy's compiler dispatch.
 from __future__ import annotations
 
 from .common import (
+    UUID,
     BFloat16,
     Boolean,
     Date,
@@ -39,7 +40,6 @@ from .common import (
     UInt64,
     UInt128,
     UInt256,
-    UUID,
 )
 from .composite import (
     AggregateFunction,

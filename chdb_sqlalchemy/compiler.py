@@ -311,7 +311,7 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
     def visit_UUID(self, type_: Any, **kw: Any) -> str:
         return "UUID"
 
-    def visit_JSON(self, type_: Any, **kw: Any) -> str:  # noqa: F811 — override SA generic
+    def visit_JSON(self, type_: Any, **kw: Any) -> str:
         return "JSON"
 
     def visit_ARRAY(self, type_: Any, **kw: Any) -> str:
