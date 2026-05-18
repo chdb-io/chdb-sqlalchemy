@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.venv/
+venv/
+.env
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+*.so
+.DS_Store
+tests/integration/cassettes/*.yaml
+!tests/integration/cassettes/.gitkeep
+/tmp_chdb/
+*.chdb/
+# L5 differential testing — reference ClickHouse binary, ~160MB
+/clickhouse
+/clickhouse-server-*
+/clickhouse-data/

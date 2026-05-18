@@ -1,0 +1,101 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chdb-sqlalchemy"
+version = "0.1.0a1"
+description = "SQLAlchemy dialect for chDB — the in-process SQL OLAP engine powered by ClickHouse. Unlocks LangChain SQLDatabaseToolkit, CrewAI NL2SQLTool, pandas.read_sql, Apache Superset, and Django ORM."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Shawn Chen", email = "changshuo.chen@clickhouse.com" },
+]
+keywords = ["sqlalchemy", "chdb", "clickhouse", "olap", "dialect", "ai", "agent", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "sqlalchemy>=2.0,<2.2",
+    "chdb>=4.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "build>=1.2",
+]
+langchain = [
+    "langchain-community>=0.3",
+    "langchain-core>=0.3",
+]
+test-integration = [
+    "vcrpy>=6.0",
+    "anthropic>=0.40",
+    "langchain-anthropic>=0.3",
+]
+test-differential = [
+    "clickhouse-driver>=0.2.9",
+]
+
+[project.entry-points."sqlalchemy.dialects"]
+chdb = "chdb_sqlalchemy.dialect:ChdbDialect"
+# Explicit-driver form needed for SA's testing-provision URL synthesis,
+# which rewrites chdb://... → chdb+dbapi://... and re-resolves the dialect.
+"chdb.dbapi" = "chdb_sqlalchemy.dialect:ChdbDialect"
+
+[project.urls]
+Homepage = "https://github.com/chdb-io/chdb-sqlalchemy"
+Repository = "https://github.com/chdb-io/chdb-sqlalchemy"
+Issues = "https://github.com/chdb-io/chdb-sqlalchemy/issues"
+Documentation = "https://github.com/chdb-io/chdb-sqlalchemy#readme"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chdb_sqlalchemy"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Exclude the SA dialect-compliance suite from the default run because
+# it requires the --dburi flag and uses a plugin that interferes with
+# normal test collection. Run it explicitly: pytest tests/sa_suite/ --dburi chdb:///:memory:
+norecursedirs = ["sa_suite"]
+markers = [
+    "integration: end-to-end tests requiring real or recorded LLM (L4)",
+    "differential: tests comparing chDB output against ClickHouse server (L5)",
+    "perf: performance regression tests (L6)",
+    "fuzz: property-based fuzz tests (L7)",
+    "slow: tests taking >5 seconds",
+]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
+disallow_untyped_decorators = false
