@@ -436,7 +436,7 @@ def _dynamic(parser: _Parser, args: list) -> sa_types.TypeEngine:
     raise ChdbTypeNotSupportedError(parser.s, "Unrecognised Dynamic argument form")
 
 
-def _agg(cls):  # type: ignore[no-untyped-def]
+def _agg(cls):
     def build(parser: _Parser, args: list) -> sa_types.TypeEngine:
         if not args or not isinstance(args[0], str):
             raise ChdbTypeNotSupportedError(parser.s, f"{cls.__name__} requires function name")

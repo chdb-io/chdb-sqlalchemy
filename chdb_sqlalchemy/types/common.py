@@ -95,7 +95,7 @@ class _ChdbType(types.TypeEngine):
 
     __abstract__ = True
 
-    def adapt(self, impltype, **kw):  # type: ignore[override]
+    def adapt(self, impltype, **kw):
         # Bypass SA's util.constructor_copy (which assumes kwarg-only init)
         # by returning a shallow copy. SA asserts impl is not self, so we
         # must return a different instance.
@@ -118,17 +118,46 @@ class String(types.String, _ChdbType):
     __visit_name__ = "String"
 
 
-class FixedString(_ChdbType):
+class FixedString(types.CHAR, _ChdbType):
+    """``FixedString(N)`` — chDB native fixed-width string. Inherits SA's
+    ``CHAR`` so reflection round-trips ``Column(CHAR(N))`` declarations
+    pass SA's ``isinstance(reflected, CHAR)`` assertions."""
+
     __visit_name__ = "FixedString"
 
     def __init__(self, length: int) -> None:
         if length <= 0:
             raise ValueError("FixedString length must be positive")
-        self.length = length
+        super().__init__(length=length)
 
 
-class UUID(_ChdbType):
+def _uuid_literal_processor(self: Any, dialect: Any) -> Callable[[Any], str]:
+    def process(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        return f"toUUID('{value}')"
+    return process
+
+
+def _uuid_result_processor(self: Any, dialect: Any, coltype: Any) -> Callable[[Any], Any]:
+    import uuid as _uuid
+    def process(value: Any) -> Any:
+        if value is None or isinstance(value, _uuid.UUID):
+            return value
+        if isinstance(value, str):
+            try:
+                return _uuid.UUID(value)
+            except (ValueError, AttributeError):
+                return value
+        return value
+    return process
+
+
+class UUID(types.Uuid, _ChdbType):
+    """Inherits SA Uuid for isinstance-compatibility in reflection."""
     __visit_name__ = "UUID"
+    literal_processor = _uuid_literal_processor
+    result_processor = _uuid_result_processor
 
 
 # -------------------- integer family --------------------
@@ -235,22 +264,113 @@ class Decimal(types.Numeric, _ChdbType):
 
 # -------------------- bool --------------------
 
+def _bool_result_processor(self: Any, dialect: Any, coltype: Any) -> Callable[[Any], Any]:
+    """Coerce int/str values to native bool — chdb.dbapi sometimes returns
+    bool columns as ``'True'``/``'False'`` strings or ``0``/``1`` ints
+    depending on storage."""
+    def process(value: Any) -> Any:
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() not in ("false", "0", "")
+        if isinstance(value, int):
+            return bool(value)
+        return value
+    return process
+
+
+def _bool_literal_processor(self: Any, dialect: Any) -> Callable[[Any], str]:
+    def process(value: Any) -> str:
+        return "true" if value else "false"
+    return process
+
+
 class Boolean(types.Boolean, _ChdbType):
     __visit_name__ = "Boolean"
+    result_processor = _bool_result_processor
+    literal_processor = _bool_literal_processor
 
 
 # -------------------- date/time family --------------------
 
+def _date_literal_processor(self: Any, dialect: Any) -> Callable[[Any], str]:
+    """Render Python date as ``toDate('YYYY-MM-DD')`` so chDB stores it
+    as Date not String."""
+    def process(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        return f"toDate('{value.isoformat() if hasattr(value, 'isoformat') else value}')"
+    return process
+
+
+def _datetime_literal_processor(self: Any, dialect: Any) -> Callable[[Any], str]:
+    def process(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        iso = value.isoformat().replace("T", " ") if hasattr(value, "isoformat") else str(value)
+        return f"toDateTime('{iso}')"
+    return process
+
+
+def _datetime64_literal_processor(self: Any, dialect: Any) -> Callable[[Any], str]:
+    def process(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        iso = value.isoformat().replace("T", " ") if hasattr(value, "isoformat") else str(value)
+        precision = getattr(self, "precision", 3)
+        return f"toDateTime64('{iso}', {precision})"
+    return process
+
+
+def _time_literal_processor(self: Any, dialect: Any) -> Callable[[Any], str]:
+    def process(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        return f"toTime('{value.isoformat() if hasattr(value, 'isoformat') else value}')"
+    return process
+
+
+def _wrap_bind(fn_name: str):
+    """Build a ``bind_expression`` that wraps the ``?`` placeholder in a
+    chDB conversion function. SA emits ``toDate(?)``, ``toDateTime(?)``,
+    ``toUUID(?)`` etc., letting chdb.dbapi pass the raw value as a string
+    bind that the function then parses into the right type."""
+    from sqlalchemy.sql import elements
+
+    def bind_expression(self, bindvalue):
+        return elements.BinaryExpression(
+            elements.literal_column(fn_name + "("),
+            elements.BinaryExpression(
+                bindvalue, elements.literal_column(")"), elements.operators.concat_op
+            ),
+            elements.operators.concat_op,
+        )
+
+    # Simpler: use SA's func()
+    from sqlalchemy import func
+
+    def bind_expression_simple(self, bindvalue):
+        return getattr(func, fn_name)(bindvalue)
+
+    return bind_expression_simple
+
+
 class Date(types.Date, _ChdbType):
     __visit_name__ = "Date"
+    literal_processor = _date_literal_processor
+    bind_expression = _wrap_bind("toDate")
 
 
 class Date32(types.Date, _ChdbType):
     __visit_name__ = "Date32"
+    literal_processor = _date_literal_processor
+    bind_expression = _wrap_bind("toDate32")
 
 
 class DateTime(types.DateTime, _ChdbType):
     __visit_name__ = "DateTime"
+    literal_processor = _datetime_literal_processor
+    bind_expression = _wrap_bind("toDateTime")
 
     def __init__(self, timezone: str | None = None) -> None:
         super().__init__(timezone=bool(timezone))
@@ -259,6 +379,8 @@ class DateTime(types.DateTime, _ChdbType):
 
 class DateTime64(types.DateTime, _ChdbType):
     __visit_name__ = "DateTime64"
+    literal_processor = _datetime64_literal_processor
+    bind_expression = _wrap_bind("toDateTime64")
 
     def __init__(self, precision: int = 3, timezone: str | None = None) -> None:
         if not 0 <= precision <= 9:
@@ -270,10 +392,12 @@ class DateTime64(types.DateTime, _ChdbType):
 
 class Time(types.Time, _ChdbType):
     __visit_name__ = "Time"
+    literal_processor = _time_literal_processor
 
 
 class Time64(types.Time, _ChdbType):
     __visit_name__ = "Time64"
+    literal_processor = _time_literal_processor
 
     def __init__(self, precision: int = 3) -> None:
         if not 0 <= precision <= 9:

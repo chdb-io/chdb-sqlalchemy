@@ -46,9 +46,19 @@ class _DbapiShim:
     Connection (which in turn returns our wrapped Cursor for result-value
     coercion). Forwards every other attribute access to the underlying
     module so callers can't tell the shim is there.
+
+    Also overrides ``paramstyle`` from upstream's ``"format"`` (``%s``) to
+    ``"qmark"`` (``?``). The underlying ``chdb.dbapi`` accepts both styles
+    transparently. We pick qmark because SA's ``IdentifierPreparer.__init__``
+    sets ``_double_percents = True`` only for the format/pyformat styles —
+    that flag causes ``%`` literals in user data (column comments, string
+    values) to be doubled to ``%%`` during ``render_literal_value``, which
+    chDB then stores literally. qmark sidesteps this entirely.
     """
 
     __slots__ = ("_mod",)
+
+    paramstyle = "qmark"  # overrides chdb.dbapi.paramstyle
 
     def __init__(self, mod: Any) -> None:
         self._mod = mod
@@ -162,9 +172,8 @@ def url_to_connect_args(url: URL) -> dict[str, Any]:
     # 'settings' is a multi-value field: settings=max_memory_usage=10G&settings=...
     settings = query.pop("settings", None)
     if settings is not None:
-        if isinstance(settings, str):
-            settings = [settings]
-        kwargs["settings"] = _parse_settings_list(settings)
+        settings_list = [settings] if isinstance(settings, str) else list(settings)
+        kwargs["settings"] = _parse_settings_list(settings_list)
     # Anything left over goes through as-is (forward compatibility).
     kwargs.update(query)
     return kwargs

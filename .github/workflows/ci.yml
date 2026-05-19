@@ -36,10 +36,8 @@ jobs:
           pip install -e ".[dev,langchain]"
       - name: Lint (ruff)
         run: ruff check chdb_sqlalchemy tests
-      # mypy strict mode against SA typed stubs surfaces 100+ false-positive
-      # "override" warnings (SA's ReflectedColumn vs our dict[str, Any]
-      # disagree at the type level even though behaviourally equivalent).
-      # Tracked as v0.2 work — see docs/known-skips.md.
+      - name: Type check (mypy)
+        run: mypy chdb_sqlalchemy
       - name: Unit + Contract tests
         # L1 type parser + connector + L3 LangChain contract.
         # Excludes integration/differential/perf/fuzz (covered in nightly).
@@ -60,6 +58,21 @@ jobs:
           pip install -e ".[dev]"
       - name: Fuzz the type parser
         run: pytest -ra -m fuzz tests/fuzz
+
+  # ---------------------------------------------------------------- L2 SA compliance suite
+  sa-suite:
+    name: SQLAlchemy dialect compliance suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run SA suite against chDB
+        run: 'pytest tests/sa_suite/ --dburi chdb:///:memory: -ra'
 
   # ---------------------------------------------------------------- L4 integration (nightly)
   integration:

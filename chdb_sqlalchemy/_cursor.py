@@ -63,6 +63,46 @@ def _coerce_decimal(v: Any) -> Any:
     return v
 
 
+def _coerce_date(v: Any) -> Any:
+    """``Nullable(Date)`` / sometimes ``Date`` comes back as 'YYYY-MM-DD' str."""
+    import datetime as _dt
+    if v is None or (isinstance(v, _dt.date) and not isinstance(v, _dt.datetime)):
+        return v
+    if isinstance(v, str):
+        try:
+            return _dt.date.fromisoformat(v)
+        except ValueError:
+            return v
+    return v
+
+
+def _coerce_datetime(v: Any) -> Any:
+    """``Nullable(DateTime[64])`` comes back as 'YYYY-MM-DD HH:MM:SS[.fff]' str."""
+    import datetime as _dt
+    if v is None or isinstance(v, _dt.datetime):
+        return v
+    if isinstance(v, str):
+        try:
+            # Handle 'YYYY-MM-DD HH:MM:SS' and 'YYYY-MM-DD HH:MM:SS.fff'
+            return _dt.datetime.fromisoformat(v.replace(" ", "T"))
+        except ValueError:
+            return v
+    return v
+
+
+def _coerce_time(v: Any) -> Any:
+    """``Nullable(Time[64])`` comes back as 'HH:MM:SS[.fff]' str."""
+    import datetime as _dt
+    if v is None or isinstance(v, _dt.time):
+        return v
+    if isinstance(v, str):
+        try:
+            return _dt.time.fromisoformat(v)
+        except ValueError:
+            return v
+    return v
+
+
 def _coerce_literal(v: Any) -> Any:
     """Parse a Python repr-style string into a real Python object.
 
@@ -124,6 +164,13 @@ def _converter_for(type_str: str) -> Callable[[Any], Any] | None:
         return _coerce_int
     if inner.startswith("Float") or inner.startswith("BFloat"):
         return _coerce_float
+    # Date / DateTime / Time — Nullable(date) tends to come back as str
+    if inner == "Date" or inner == "Date32":
+        return _coerce_date
+    if inner.startswith("DateTime"):
+        return _coerce_datetime
+    if inner == "Time" or inner.startswith("Time64"):
+        return _coerce_time
     # Tuple needs the dedicated tuple-coercer (chdb.dbapi serialises Tuples
     # using list-bracket syntax — see _coerce_tuple). Must come before the
     # generic composite fallback.

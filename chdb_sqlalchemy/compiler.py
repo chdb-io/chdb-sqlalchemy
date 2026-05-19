@@ -13,12 +13,79 @@ prompt fails and the LLM never sees the schema.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy.sql import compiler
+from sqlalchemy.sql import sqltypes as _sqltypes
 
 from . import types as ct
 from .types import composite
+
+# Literal-render helper — SA's render_literal_value() needs a type instance.
+_SAStringType = _sqltypes.String()
+
+
+class ChdbSQLCompiler(compiler.SQLCompiler):
+    """chDB-flavoured SQL statement compiler.
+
+    Overrides:
+    * ``compound_keywords`` — emit ``UNION DISTINCT`` for bare UNION
+      (ClickHouse rejects bare UNION as ambiguous)
+    * ``limit_clause`` — handle OFFSET-without-LIMIT (SA emits
+      ``LIMIT -1 OFFSET m``; chDB rejects negative). Substitute the
+      UInt64 sentinel.
+    """
+
+    compound_keywords: ClassVar[dict] = dict(compiler.SQLCompiler.compound_keywords)
+    # mypy thinks ``CompoundSelect.UNION`` doesn't exist on the generic
+    # alias type, but it does at runtime (UNION/INTERSECT/EXCEPT are
+    # class attributes on CompoundSelect). Index assignment is fine.
+    compound_keywords[
+        compiler.selectable.CompoundSelect.UNION  # type: ignore[attr-defined]
+    ] = "UNION DISTINCT"
+
+    # UInt64 max value chDB happily ignores when paired with OFFSET.
+    _LIMIT_UNLIMITED = 18446744073709551615  # 2**64 - 1
+
+    def visit_delete(self, delete_stmt: Any, **kw: Any) -> str:
+        """ClickHouse uses ``ALTER TABLE t DELETE WHERE ...`` not ``DELETE FROM t``.
+
+        Build the equivalent ALTER TABLE form. SA's generic visit_delete
+        produces ``DELETE FROM t [WHERE ...]`` which chDB parses as
+        ``SELECT DELETE FROM t`` and errors with UNKNOWN_IDENTIFIER.
+        """
+        # Pull the target table + the WHERE clause.
+        table = delete_stmt.table
+        full = self.preparer.format_table(table)
+        where_clause = delete_stmt._where_criteria
+        if where_clause:
+            # Combine multiple criteria with AND, compile each
+            from sqlalchemy.sql.elements import BooleanClauseList
+            if len(where_clause) > 1:
+                where = BooleanClauseList._construct_raw(
+                    __import__("sqlalchemy").and_, where_clause
+                )
+            else:
+                where = where_clause[0]
+            where_sql = self.process(where, **kw)
+            return f"ALTER TABLE {full} DELETE WHERE {where_sql}"
+        # No WHERE: delete everything
+        return f"ALTER TABLE {full} DELETE WHERE 1=1"
+
+    def limit_clause(self, select: Any, **kw: Any) -> str:
+        # SA's default uses ``LIMIT %s OFFSET %s`` or ``LIMIT %s`` /
+        # ``OFFSET %s``. With OFFSET-only, SA emits ``LIMIT -1 OFFSET N``
+        # which chDB rejects.
+        text = ""
+        if select._limit_clause is not None:
+            limit_val = self.process(select._limit_clause, **kw)
+            text += f"\n LIMIT {limit_val}"
+        elif select._offset_clause is not None:
+            # OFFSET without LIMIT — chDB requires both
+            text += f"\n LIMIT {self._LIMIT_UNLIMITED}"
+        if select._offset_clause is not None:
+            text += f" OFFSET {self.process(select._offset_clause, **kw)}"
+        return text
 
 
 class ChdbTypeCompiler(compiler.GenericTypeCompiler):
@@ -34,7 +101,7 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
     def visit_FixedString(self, type_: ct.FixedString, **kw: Any) -> str:
         return f"FixedString({type_.length})"
 
-    def visit_UUID(self, type_: ct.UUID, **kw: Any) -> str:  # type: ignore[override]
+    def visit_UUID(self, type_: ct.UUID, **kw: Any) -> str:
         return "UUID"
 
     # ------------------------------------------------------------------
@@ -93,20 +160,20 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
     def visit_Decimal(self, type_: ct.Decimal, **kw: Any) -> str:
         return f"Decimal({type_.precision}, {type_.scale})"
 
-    def visit_Boolean(self, type_: ct.Boolean, **kw: Any) -> str:  # type: ignore[override]
+    def visit_Boolean(self, type_: ct.Boolean, **kw: Any) -> str:
         return "Bool"
 
     # ------------------------------------------------------------------
     # Date / Time
     # ------------------------------------------------------------------
 
-    def visit_Date(self, type_: ct.Date, **kw: Any) -> str:  # type: ignore[override]
+    def visit_Date(self, type_: ct.Date, **kw: Any) -> str:
         return "Date"
 
     def visit_Date32(self, type_: ct.Date32, **kw: Any) -> str:
         return "Date32"
 
-    def visit_DateTime(self, type_: ct.DateTime, **kw: Any) -> str:  # type: ignore[override]
+    def visit_DateTime(self, type_: ct.DateTime, **kw: Any) -> str:
         if type_.tz_name:
             return f"DateTime('{type_.tz_name}')"
         return "DateTime"
@@ -116,7 +183,7 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
             return f"DateTime64({type_.precision}, '{type_.tz_name}')"
         return f"DateTime64({type_.precision})"
 
-    def visit_Time(self, type_: ct.Time, **kw: Any) -> str:  # type: ignore[override]
+    def visit_Time(self, type_: ct.Time, **kw: Any) -> str:
         return "Time"
 
     def visit_Time64(self, type_: ct.Time64, **kw: Any) -> str:
@@ -129,7 +196,7 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
     def _enum_members_clause(self, members: dict[str, int]) -> str:
         return ", ".join(f"'{name}' = {value}" for name, value in members.items())
 
-    def visit_Enum(self, type_: ct.Enum, **kw: Any) -> str:  # type: ignore[override]
+    def visit_Enum(self, type_: ct.Enum, **kw: Any) -> str:
         return f"Enum({self._enum_members_clause(type_.members)})"
 
     def visit_Enum8(self, type_: ct.Enum8, **kw: Any) -> str:
@@ -162,7 +229,7 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
     def visit_LowCardinality(self, type_: composite.LowCardinality, **kw: Any) -> str:
         return f"LowCardinality({self._process_inner(type_.inner, **kw)})"
 
-    def visit_Array(self, type_: composite.Array, **kw: Any) -> str:  # type: ignore[override]
+    def visit_Array(self, type_: composite.Array, **kw: Any) -> str:
         return f"Array({self._process_inner(type_.item_type, **kw)})"
 
     def visit_Tuple(self, type_: composite.Tuple, **kw: Any) -> str:
@@ -207,7 +274,7 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
             return f"Dynamic(max_types={type_.max_types})"
         return "Dynamic"
 
-    def visit_JSON(self, type_: Any, **kw: Any) -> str:  # type: ignore[override]
+    def visit_JSON(self, type_: Any, **kw: Any) -> str:
         return "JSON"
 
     def visit_JSONLegacy(self, type_: Any, **kw: Any) -> str:
@@ -308,11 +375,11 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
     def visit_DECIMAL(self, type_: Any, **kw: Any) -> str:
         return self.visit_NUMERIC(type_, **kw)
 
-    def visit_UUID(self, type_: Any, **kw: Any) -> str:
-        return "UUID"
-
-    def visit_JSON(self, type_: Any, **kw: Any) -> str:
-        return "JSON"
+    # Note: ``visit_UUID`` and ``visit_JSON`` are defined earlier in this
+    # class for our typed ``ct.UUID``/``ct.JSON`` classes; the late
+    # duplicates have been removed to avoid mypy [no-redef] noise. They
+    # also handle SA generic ``UUID``/``JSON`` types because those are
+    # bound via ``colspecs`` in the dialect.
 
     def visit_ARRAY(self, type_: Any, **kw: Any) -> str:
         # SA generic ``ARRAY(item_type)`` → chDB ``Array(T)``.
@@ -378,6 +445,17 @@ class ChdbTypeCompiler(compiler.GenericTypeCompiler):
         return "String"
 
 
+def _column_is_chdb_nullable_already(column: Any) -> bool:
+    """True if the column's type is already wrapped in ``Nullable(...)``
+    or ``LowCardinality(Nullable(...))`` — avoids double-wrapping."""
+    from .types.composite import LowCardinality, Nullable
+
+    t = column.type
+    if isinstance(t, Nullable):
+        return True
+    return bool(isinstance(t, LowCardinality) and isinstance(t.inner, Nullable))
+
+
 class ChdbDDLCompiler(compiler.DDLCompiler):
     """DDL compiler — emits chDB-flavoured CREATE TABLE / engine clauses.
 
@@ -393,15 +471,169 @@ class ChdbDDLCompiler(compiler.DDLCompiler):
     """
 
     def post_create_table(self, table: Any) -> str:
-        """Append ENGINE clause. v0.1: stay quiet; v0.3 reads from reflection."""
-        return ""
+        """Append the ``ENGINE = ... ORDER BY (...)`` suffix every chDB
+        ``CREATE TABLE`` needs.
+
+        SA-generic CREATE TABLE produces just the column list. ClickHouse /
+        chDB requires every table to declare an engine — at minimum
+        ``ENGINE = MergeTree`` with an ``ORDER BY`` clause (or
+        ``ORDER BY tuple()`` to opt out of sorting).
+
+        We pick ``MergeTree`` and use the primary-key columns as the
+        sorting key when available — this both satisfies chDB's
+        constraint and gives reflection a faithful PK round-trip via
+        ``system.tables.sorting_key``. For tables without a PK we fall
+        back to ``ORDER BY tuple()`` (no sort key).
+        """
+        pk_cols = [c.name for c in table.primary_key.columns]
+        if pk_cols:
+            order_by = ", ".join(self.preparer.quote(c) for c in pk_cols)
+            return f"\nENGINE = MergeTree\nORDER BY ({order_by})"
+        return "\nENGINE = MergeTree\nORDER BY tuple()"
+
+    def get_column_specification(self, column: Any, **kwargs: Any) -> str:
+        """Emit ``<name> Nullable(<type>)`` when SA Column has ``nullable=True``.
+
+        ClickHouse defaults to NOT NULL. SA's generic SQL default is NULL.
+        Our reflection unwraps ``Nullable(T)`` to ``nullable=True`` on the
+        Column; this method does the reverse — wraps ``Nullable(...)``
+        around the rendered type spec when needed for round-trip DDL.
+
+        We also suppress the ``NOT NULL`` suffix SA's default appends —
+        chDB doesn't need it because non-Nullable types are already
+        not-null at the type level.
+        """
+        col_name = self.preparer.format_column(column)
+        type_spec = self.dialect.type_compiler_instance.process(
+            column.type, type_expression=column
+        )
+        # Wrap nullable columns in Nullable() if not already wrapped.
+        if column.nullable and not _column_is_chdb_nullable_already(column):
+            type_spec = f"Nullable({type_spec})"
+
+        colspec = f"{col_name} {type_spec}"
+
+        default = self.get_column_default_string(column)
+        if default is not None:
+            colspec += " DEFAULT " + default
+
+        # chDB doesn't accept NOT NULL — non-Nullable types are already
+        # not-null at the type level.
+        return colspec
+
+    def create_table_constraints(
+        self, table: Any, _include_foreign_key_constraints: Any = None, **kw: Any
+    ) -> str:
+        """Emit only constraints chDB supports inside CREATE TABLE.
+
+        SA's default emits PK / FK / CHECK / UNIQUE. chDB enforces none of
+        them — PK is just MergeTree ORDER BY, FK / CHECK / UNIQUE don't
+        exist as enforced constraints. Filter them at the listing level
+        (returning empty strings from ``visit_*`` still leaves stray commas
+        in the DDL). We reimplement SA's join loop so the filter is local.
+        """
+        from sqlalchemy.schema import (
+            CheckConstraint,
+            ForeignKeyConstraint,
+            PrimaryKeyConstraint,
+            UniqueConstraint,
+        )
+
+        skip_types = (
+            PrimaryKeyConstraint,
+            ForeignKeyConstraint,
+            CheckConstraint,
+            UniqueConstraint,
+        )
+
+        constraints = [
+            c
+            for c in table._sorted_constraints
+            if not isinstance(c, skip_types)
+        ]
+        return ", \n\t".join(
+            p
+            for p in (self.process(c) for c in constraints if c._should_create_for_compiler(self))
+            if p is not None and p != ""
+        )
 
     def visit_primary_key_constraint(self, constraint: Any, **kw: Any) -> str:
-        # ClickHouse PKs are not enforced; they map to the MergeTree ORDER BY.
-        # Emitting "PRIMARY KEY (...)" would be valid syntax but redundant
-        # with the engine clause. We suppress the generic emission.
+        # Belt + suspenders — should be filtered by create_table_constraints,
+        # but ALTER TABLE ADD CONSTRAINT path can also call this directly.
         return ""
 
     def visit_foreign_key_constraint(self, constraint: Any, **kw: Any) -> str:
-        # No foreign keys in ClickHouse / chDB.
+        return ""
+
+    def visit_check_constraint(self, constraint: Any, **kw: Any) -> str:
+        return ""
+
+    def visit_column_check_constraint(self, constraint: Any, **kw: Any) -> str:
+        return ""
+
+    def visit_unique_constraint(self, constraint: Any, **kw: Any) -> str:
+        return ""
+
+    def visit_create_index(self, create: Any, **kw: Any) -> str:
+        """Suppress generic ``CREATE INDEX`` DDL.
+
+        ClickHouse uses ``ALTER TABLE t ADD INDEX name expr TYPE …`` for
+        its data-skipping indexes, not the standard ``CREATE INDEX`` SQL.
+        Returning empty here makes SA's ``MetaData.create_all()`` (which
+        emits each index as a separate DDL statement) skip indexes
+        entirely — they'd need to be applied via ALTER post-create. v0.3
+        will add native ALTER TABLE ADD INDEX support.
+        """
+        return ""
+
+    def visit_drop_index(self, drop: Any, **kw: Any) -> str:
+        # Same reasoning — ClickHouse uses ALTER TABLE DROP INDEX.
+        return ""
+
+    # ------------------------------------------------------------------
+    # COMMENT — ClickHouse syntax differs from standard SQL
+    # ------------------------------------------------------------------
+    # Standard:   COMMENT ON TABLE foo IS 'x'
+    # ClickHouse: ALTER TABLE foo MODIFY COMMENT 'x'
+    #             (or inline in CREATE TABLE: COMMENT 'x')
+    # SA still declares supports_comments = True (it's true that chDB
+    # *has* comment support), but standalone COMMENT-set DDL needs the
+    # chDB syntax. The SA fixture factory uses set_table_comment for
+    # roundtrip tests, so we translate.
+
+    def visit_set_table_comment(self, create: Any, **kw: Any) -> str:
+        table = create.element
+        full_name = self.preparer.format_table(table)
+        return (
+            f"ALTER TABLE {full_name} MODIFY COMMENT "
+            f"{self.sql_compiler.render_literal_value(table.comment, _SAStringType)}"
+        )
+
+    def visit_drop_table_comment(self, drop: Any, **kw: Any) -> str:
+        table = drop.element
+        full_name = self.preparer.format_table(table)
+        return f"ALTER TABLE {full_name} MODIFY COMMENT ''"
+
+    def visit_set_column_comment(self, create: Any, **kw: Any) -> str:
+        column = create.element
+        table = column.table
+        full_name = self.preparer.format_table(table)
+        col_name = self.preparer.format_column(column)
+        return (
+            f"ALTER TABLE {full_name} COMMENT COLUMN {col_name} "
+            f"{self.sql_compiler.render_literal_value(column.comment, _SAStringType)}"
+        )
+
+    def visit_drop_column_comment(self, drop: Any, **kw: Any) -> str:
+        column = drop.element
+        table = column.table
+        full_name = self.preparer.format_table(table)
+        col_name = self.preparer.format_column(column)
+        return f"ALTER TABLE {full_name} COMMENT COLUMN {col_name} ''"
+
+    def visit_set_constraint_comment(self, create: Any, **kw: Any) -> str:
+        # ClickHouse has no constraint comments.
+        return ""
+
+    def visit_drop_constraint_comment(self, drop: Any, **kw: Any) -> str:
         return ""
