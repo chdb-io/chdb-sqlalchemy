@@ -1,6 +1,6 @@
 # Type mapping reference
 
-Authoritative mapping from ClickHouse 26.3.9.8-lts types (as emitted in
+Authoritative mapping from ClickHouse 26.3.9 (LTS) types (as emitted in
 `system.columns.type`) to the SQLAlchemy types `chdb-sqlalchemy` returns
 from reflection.
 

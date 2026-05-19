@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Nightly at 07:00 UTC. Every job below runs on every trigger
+    # (early-development policy: full coverage on each PR), so this cron
+    # is a safety-net heartbeat rather than the only path for slow jobs.
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -23,7 +29,11 @@ jobs:
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13"]
         os: [ubuntu-latest, macos-latest]
-        sqlalchemy: ["2.0.*", "2.1.*"]
+        # 2.1.x is still pre-release as of mid-2026 (2.1.0b2 latest on PyPI);
+        # pip resolves ``==2.1.*`` permissively but ``uv pip install`` rejects
+        # it as a pre-release marker, breaking dev-env setup. Re-add once
+        # 2.1 ships GA. See review feedback v0.2 / fix #1.
+        sqlalchemy: ["2.0.*"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,8 +49,9 @@ jobs:
       - name: Type check (mypy)
         run: mypy chdb_sqlalchemy
       - name: Unit + Contract tests
-        # L1 type parser + connector + L3 LangChain contract.
-        # Excludes integration/differential/perf/fuzz (covered in nightly).
+        # L1 type parser + connector + L3 LangChain contract + the torture
+        # suite. Excludes integration / differential / perf / fuzz — those
+        # have their own dedicated jobs below that also run on every PR.
         run: |
           pytest -ra -m "not integration and not differential and not perf and not fuzz"
 
@@ -74,11 +85,33 @@ jobs:
       - name: Run SA suite against chDB
         run: 'pytest tests/sa_suite/ --dburi chdb:///:memory: -ra'
 
-  # ---------------------------------------------------------------- L4 integration (nightly)
+  # ---------------------------------------------------------------- L6 perf (every PR, smoke scale)
+  perf:
+    name: Perf regression (smoke scale)
+    runs-on: ubuntu-latest
+    # Smoke-scale perf regression — ~1s of test time. Large-scale runs are
+    # gated behind ``CHDB_PERF_SCALE=large``; we leave the default (smoke)
+    # for PR CI so failures here mean a real regression in the hot path,
+    # not noise from a slow runner.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,langchain]"
+      - run: pytest -ra -m perf tests/perf
+
+  # ---------------------------------------------------------------- L4 integration (every PR)
   integration:
     name: LangChain end-to-end (cassettes)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[ci-integration]')
+    # Runs on every push / PR / schedule / manual trigger. The cassette
+    # path is fast (no live LLM); live-LLM tests inside the marker skip
+    # cleanly when ``ANTHROPIC_API_KEY`` isn't present in the runner env.
+    # Early-development policy: catch regressions on every PR rather than
+    # only at nightly.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -90,20 +123,48 @@ jobs:
       - name: Replay LLM cassettes
         run: pytest -ra -m integration tests/integration
 
-  # ---------------------------------------------------------------- L5 differential (nightly)
+  # ---------------------------------------------------------------- L5 differential (every PR)
   differential:
     name: chDB vs ClickHouse server
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:26.3.9.8-lts
-        ports: ["8123:8123", "9000:9000"]
+    # Same rationale as ``integration``: early-development policy is to
+    # catch chDB-vs-server divergence before merge, not the morning after.
+    # Cost is one Docker pull + ~30s of test execution per PR.
+    #
+    # The differential conftest spawns ``clickhouse local`` as a subprocess
+    # and expects a binary at the repo root (see tests/differential/conftest.py).
+    # We extract that binary from the clickhouse-server Docker image rather
+    # than running the image as a network service so the version is pinned
+    # to the same patch as the chDB Docker image (and the same one this
+    # dialect's docs claim parity against).
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Extract clickhouse binary from LTS image
+        run: |
+          # Try tags from most-specific to least-specific. ClickHouse's
+          # Docker Hub publishes some patch tags (``X.Y.Z.W-lts``) and
+          # rolling tags (``X.Y-lts``, ``lts``). The patch-specific tag
+          # may rotate out, so fall back to the rolling tags. The
+          # differential test's own version check ([:3] of version())
+          # will surface any unexpected major.minor.patch drift as a
+          # test failure rather than a silent pass.
+          set -e
+          for tag in "26.3.9.8-lts" "26.3-lts" "lts" "26.3.9.8" "26.3"; do
+            if docker pull "clickhouse/clickhouse-server:$tag" 2>/dev/null; then
+              echo "Using clickhouse/clickhouse-server:$tag"
+              docker create --name ch-extract "clickhouse/clickhouse-server:$tag"
+              docker cp ch-extract:/usr/bin/clickhouse ./clickhouse
+              docker rm ch-extract
+              chmod +x ./clickhouse
+              ./clickhouse --version
+              exit 0
+            fi
+          done
+          echo "ERROR: no usable clickhouse-server tag found on Docker Hub"
+          exit 1
       - run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,test-differential]"

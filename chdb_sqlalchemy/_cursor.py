@@ -77,17 +77,40 @@ def _coerce_date(v: Any) -> Any:
 
 
 def _coerce_datetime(v: Any) -> Any:
-    """``Nullable(DateTime[64])`` comes back as 'YYYY-MM-DD HH:MM:SS[.fff]' str."""
+    """``Nullable(DateTime[64])`` comes back as 'YYYY-MM-DD HH:MM:SS[.fff]' str.
+
+    Python's stdlib ``datetime`` only carries microsecond resolution, so
+    ``DateTime64(7/8/9)`` cells come back with 7-9 fractional digits that
+    must be truncated to 6 before parsing. Python 3.11+ ``fromisoformat``
+    silently truncates the extras; 3.10 raises ``ValueError`` and we'd
+    return the raw string. Truncate explicitly so behavior matches across
+    Python versions.
+    """
     import datetime as _dt
     if v is None or isinstance(v, _dt.datetime):
         return v
-    if isinstance(v, str):
-        try:
-            # Handle 'YYYY-MM-DD HH:MM:SS' and 'YYYY-MM-DD HH:MM:SS.fff'
-            return _dt.datetime.fromisoformat(v.replace(" ", "T"))
-        except ValueError:
-            return v
-    return v
+    if not isinstance(v, str):
+        return v
+    s = v.replace(" ", "T")
+    # Clip sub-microsecond fractional digits — stdlib datetime can't hold them
+    # and 3.10 fromisoformat doesn't accept them.
+    if "." in s:
+        head, _, frac = s.partition(".")
+        # ``frac`` may carry a trailing timezone block (``123456789+00:00``);
+        # split it off, truncate digits, glue back.
+        digits = ""
+        tail = ""
+        for i, ch in enumerate(frac):
+            if ch.isdigit():
+                digits += ch
+            else:
+                tail = frac[i:]
+                break
+        s = head + "." + digits[:6] + tail
+    try:
+        return _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return v
 
 
 def _coerce_time(v: Any) -> Any:
@@ -149,13 +172,19 @@ def _converter_for(type_str: str) -> Callable[[Any], Any] | None:
     ``None`` means "no conversion needed" — pass values through. The caller
     avoids the dispatch overhead on identity columns.
     """
-    # Strip outer Nullable wrapper — it has no effect on the converter.
+    # Strip outer Nullable / LowCardinality wrappers — they have no effect
+    # on the converter. ClickHouse allows arbitrary nesting in either order
+    # (``Nullable(LowCardinality(T))`` and ``LowCardinality(Nullable(T))``
+    # both legal), so peel in a single alternating loop instead of stripping
+    # all Nullables first and then all LowCardinality.
     inner = type_str
-    while inner.startswith("Nullable("):
-        inner = inner[len("Nullable(") : -1]
-    # Strip LowCardinality — same reason.
-    while inner.startswith("LowCardinality("):
-        inner = inner[len("LowCardinality(") : -1]
+    while True:
+        if inner.startswith("Nullable("):
+            inner = inner[len("Nullable(") : -1]
+        elif inner.startswith("LowCardinality("):
+            inner = inner[len("LowCardinality(") : -1]
+        else:
+            break
 
     # Numerics
     if inner.startswith("Decimal(") or inner.startswith("Decimal32") or inner.startswith("Decimal64") or inner.startswith("Decimal128") or inner.startswith("Decimal256"):

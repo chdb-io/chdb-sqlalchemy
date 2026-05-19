@@ -53,24 +53,50 @@ class ChdbSQLCompiler(compiler.SQLCompiler):
         Build the equivalent ALTER TABLE form. SA's generic visit_delete
         produces ``DELETE FROM t [WHERE ...]`` which chDB parses as
         ``SELECT DELETE FROM t`` and errors with UNKNOWN_IDENTIFIER.
+
+        Important: chDB's mutation-predicate parser does NOT accept
+        table-qualified column references (``del_t.x``) inside the
+        ``WHERE`` of an ``ALTER TABLE ... DELETE``. SA's default column
+        visit renders ``<table>.<col>``; we override that by passing
+        ``include_table=False`` so columns render bare.
+
+        DELETE RETURNING is not supported by chDB (no such syntax in
+        the ALTER TABLE mutation form). We surface this by emitting a
+        ``RETURNING ...`` suffix in the SQL we send to chDB, so chDB
+        rejects the statement with its own SYNTAX_ERROR → ``DBAPIError``
+        — the same path SA's ``ReturningGuardsTest`` exercises. Silently
+        dropping the clause would let an SA caller think the statement
+        succeeded when their RETURNING expectation was never met.
         """
         # Pull the target table + the WHERE clause.
         table = delete_stmt.table
         full = self.preparer.format_table(table)
         where_clause = delete_stmt._where_criteria
         if where_clause:
-            # Combine multiple criteria with AND, compile each
-            from sqlalchemy.sql.elements import BooleanClauseList
-            if len(where_clause) > 1:
-                where = BooleanClauseList._construct_raw(
-                    __import__("sqlalchemy").and_, where_clause
-                )
-            else:
-                where = where_clause[0]
-            where_sql = self.process(where, **kw)
-            return f"ALTER TABLE {full} DELETE WHERE {where_sql}"
-        # No WHERE: delete everything
-        return f"ALTER TABLE {full} DELETE WHERE 1=1"
+            # Combine multiple criteria with AND through the public helper
+            # (SA's ``and_`` returns a proper BooleanClauseList; building one
+            # directly via ``_construct_raw`` requires a real Operator object
+            # and would crash for repeated ``.where(...)`` chains).
+            from sqlalchemy import and_ as sa_and
+            where = sa_and(*where_clause) if len(where_clause) > 1 else where_clause[0]
+            # ``include_table=False`` propagates into ``visit_column`` so
+            # references render as ``x``, not ``del_t.x``.
+            where_kw = {**kw, "include_table": False}
+            where_sql = self.process(where, **where_kw)
+            stmt = f"ALTER TABLE {full} DELETE WHERE {where_sql}"
+        else:
+            # No WHERE: delete everything
+            stmt = f"ALTER TABLE {full} DELETE WHERE 1=1"
+
+        # Append RETURNING verbatim — chDB will reject it with SYNTAX_ERROR,
+        # which surfaces as DBAPIError. Better than dropping it silently.
+        if delete_stmt._returning:
+            cols = ", ".join(
+                self.process(c, include_table=False, **kw)
+                for c in delete_stmt._returning
+            )
+            stmt += f" RETURNING {cols}"
+        return stmt
 
     def limit_clause(self, select: Any, **kw: Any) -> str:
         # SA's default uses ``LIMIT %s OFFSET %s`` or ``LIMIT %s`` /
@@ -526,14 +552,18 @@ class ChdbDDLCompiler(compiler.DDLCompiler):
     ) -> str:
         """Emit only constraints chDB supports inside CREATE TABLE.
 
-        SA's default emits PK / FK / CHECK / UNIQUE. chDB enforces none of
-        them — PK is just MergeTree ORDER BY, FK / CHECK / UNIQUE don't
-        exist as enforced constraints. Filter them at the listing level
-        (returning empty strings from ``visit_*`` still leaves stray commas
-        in the DDL). We reimplement SA's join loop so the filter is local.
+        SA's default emits PK / FK / CHECK / UNIQUE. chDB:
+
+        * **PK** — replaced by ``ENGINE = MergeTree() ORDER BY ...``; skip.
+        * **FK** — not supported / not enforced; skip.
+        * **UNIQUE** — not supported / not enforced; skip.
+        * **CHECK** — **enforced** by chDB (error code 469
+          VIOLATED_CONSTRAINT). Keep and emit, using chDB's
+          ``CONSTRAINT <name> CHECK <expr>`` form.
+
+        We reimplement SA's join loop so the filter is local.
         """
         from sqlalchemy.schema import (
-            CheckConstraint,
             ForeignKeyConstraint,
             PrimaryKeyConstraint,
             UniqueConstraint,
@@ -542,7 +572,6 @@ class ChdbDDLCompiler(compiler.DDLCompiler):
         skip_types = (
             PrimaryKeyConstraint,
             ForeignKeyConstraint,
-            CheckConstraint,
             UniqueConstraint,
         )
 
@@ -566,10 +595,37 @@ class ChdbDDLCompiler(compiler.DDLCompiler):
         return ""
 
     def visit_check_constraint(self, constraint: Any, **kw: Any) -> str:
-        return ""
+        """Emit ``CONSTRAINT <name> CHECK <expr>`` — enforced by chDB.
+
+        Two chDB quirks the implementation handles:
+
+        * Column references inside the expression must be bare (no
+          ``<table>.<col>``) just like in ``ALTER TABLE ... DELETE
+          WHERE``; the mutation/constraint parser doesn't accept
+          qualified names.
+        * chDB requires every CHECK to have a name. The bare
+          ``CHECK <expr>`` form (legal in standard SQL) raises
+          ``SYNTAX_ERROR``. When SA hands us an unnamed CHECK we
+          auto-generate one from the expression text so the constraint
+          still gets enforced.
+        """
+        sqltext = self.sql_compiler.process(
+            constraint.sqltext, include_table=False, literal_binds=True
+        )
+        if constraint.name:
+            name = self.preparer.format_constraint(constraint)
+        else:
+            # Stable name derived from the expression — same expression
+            # always gets the same auto-name, so reflection round-trips
+            # land in a predictable place.
+            import hashlib
+
+            digest = hashlib.sha1(sqltext.encode("utf-8")).hexdigest()[:8]
+            name = f"ck_auto_{digest}"
+        return f"CONSTRAINT {name} CHECK {sqltext}"
 
     def visit_column_check_constraint(self, constraint: Any, **kw: Any) -> str:
-        return ""
+        return self.visit_check_constraint(constraint, **kw)
 
     def visit_unique_constraint(self, constraint: Any, **kw: Any) -> str:
         return ""

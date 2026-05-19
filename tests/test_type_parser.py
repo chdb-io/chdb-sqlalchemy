@@ -300,7 +300,7 @@ def test_decimal_wrong_args_raises():
 # Roundtrip: reflection-shaped strings the dialect will see in practice
 # ---------------------------------------------------------------------------
 
-# Each entry is a type string ClickHouse 26.3.9.8 might emit in
+# Each entry is a type string ClickHouse 26.3.9.x might emit in
 # `system.columns.type`. The test only asserts that parsing succeeds — the
 # detailed shape is covered by the cases above.
 @pytest.mark.parametrize(

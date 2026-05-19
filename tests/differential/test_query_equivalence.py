@@ -1,9 +1,9 @@
-"""L5 — Differential testing: chDB vs ClickHouse 26.3.9.8-lts reference.
+"""L5 — Differential testing: chDB vs ClickHouse 26.3.9 (LTS) reference.
 
 For each query in :data:`QUERY_CORPUS`, we run it twice:
 
 1. Through our SQLAlchemy dialect against the chDB engine
-2. Directly through ``clickhouse local`` (the same v26.3.9.8 build,
+2. Directly through ``clickhouse local`` (the same v26.3.9.x build,
    non-embedded)
 
 …then compare the row-string output. Mismatches are classified into
@@ -284,19 +284,18 @@ def test_chdb_matches_reference(
 
 
 def test_version_strings_are_compatible(clickhouse_local, chdb_seeded_engine):
-    """Sanity check: chDB and the reference binary are both 26.3 series.
+    """Sanity check: chDB and the reference binary track the same 26.3.9 patch line.
 
-    A real version mismatch (e.g. reference downloaded as 25.x by accident)
-    would invalidate every comparison below. We just check the major.minor
-    prefix.
+    A real version mismatch (e.g. reference downloaded as 26.4.x by accident,
+    or chDB diverging onto a later patch series) would invalidate every
+    comparison below. We check major.minor.patch — the LTS guarantee is at
+    that granularity, not just major.minor.
     """
     ref_ver = clickhouse_local.version()
     with chdb_seeded_engine.connect() as conn:
         chdb_ver = conn.execute(text("SELECT version()")).scalar()
-    # Both should be on the 26.3 line. We don't require exact patch match
-    # — but if they're more than one minor apart, flag it.
-    ref_prefix = ".".join(ref_ver.split(".")[:2])
-    chdb_prefix = ".".join(str(chdb_ver).split(".")[:2])
+    ref_prefix = ".".join(ref_ver.split(".")[:3])
+    chdb_prefix = ".".join(str(chdb_ver).split(".")[:3])
     assert ref_prefix == chdb_prefix, (
         f"version skew: chDB={chdb_ver} vs reference={ref_ver}; "
         f"L5 results are not authoritative."

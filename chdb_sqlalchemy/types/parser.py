@@ -436,6 +436,25 @@ def _dynamic(parser: _Parser, args: list) -> sa_types.TypeEngine:
     raise ChdbTypeNotSupportedError(parser.s, "Unrecognised Dynamic argument form")
 
 
+def _object_legacy(parser: _Parser, args: list) -> sa_types.TypeEngine:
+    """Builder for legacy ``Object(...)`` types.
+
+    ClickHouse pre-24.10 emitted JSON-like columns as ``Object('json')``.
+    The argument is a string literal naming the schema family — only
+    ``'json'`` is supported (everything else was deprecated long before
+    chDB's 26.3 baseline). Accept and ignore the ``'json'`` arg; reject
+    anything else explicitly so the user knows the parser saw an unsupported
+    form rather than silently mapping it to ``JSONLegacy``.
+    """
+    if not args:
+        return json_.JSONLegacy()
+    if len(args) == 1 and isinstance(args[0], str) and args[0].lower() == "json":
+        return json_.JSONLegacy()
+    raise ChdbTypeNotSupportedError(
+        parser.s, f"Object(...) only supports 'json'; got {args!r}"
+    )
+
+
 def _agg(cls):
     def build(parser: _Parser, args: list) -> sa_types.TypeEngine:
         if not args or not isinstance(args[0], str):
@@ -510,7 +529,7 @@ _BUILDERS: dict[str, Callable[[_Parser, list], sa_types.TypeEngine]] = {
     "Variant": _variant,
     "Dynamic": _dynamic,
     "JSON": _scalar(json_.JSON),
-    "Object": _scalar(json_.JSONLegacy),  # legacy `Object('json')` — args ignored
+    "Object": _object_legacy,  # legacy `Object('json')` — accepts the 'json' arg
     # Geo
     "Point": _scalar(geo.Point),
     "Ring": _scalar(geo.Ring),

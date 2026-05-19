@@ -6,7 +6,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-### Fixed (bug surfaced by L5 differential vs ClickHouse 26.3.9.8-lts)
+### Fixed (bug surfaced by L5 differential vs ClickHouse 26.3.9 (LTS))
 
 10. **`Tuple(...)` returned as `list` not `tuple`** — chdb.dbapi serialises
     Tuple cells using list-bracket syntax (``'[1, 2, 3]'``); our cursor
@@ -75,7 +75,7 @@ Each would have broken a category of LLM use cases silently or noisily:
 - Recursive parser for ClickHouse type strings — supports nested
   `Array` / `Nullable` / `LowCardinality` / `Tuple` / `Map` / `Nested`
   to arbitrary depth
-- Type mappings for the full CH 26.3.9.8-lts scalar set, including
+- Type mappings for the full CH 26.3.9 (LTS) scalar set, including
   `BFloat16`, `Time` / `Time64`, `Variant`, `Dynamic`, semantic `JSON`,
   `Point` / `Ring` / `Polygon` / `MultiPolygon`
 - Reflection methods backing `Inspector.get_*` for LangChain

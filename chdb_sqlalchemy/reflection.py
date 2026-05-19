@@ -28,6 +28,173 @@ if TYPE_CHECKING:
     from .dialect import ChdbDialect
 
 
+def _split_sorting_key(sorting_key: str) -> list[str]:
+    """Split a ClickHouse ``ORDER BY`` / sorting-key expression list by commas.
+
+    The naive ``split(",")`` breaks on function-call expressions:
+    ``cityHash64(u, s), ts`` would yield ``['cityHash64(u', ' s)', ' ts']``.
+    Track paren depth and quote state so commas inside ``(...)`` /
+    ``'...'`` are not treated as separators.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    in_squote = False
+    in_bquote = False
+    i = 0
+    while i < len(sorting_key):
+        ch = sorting_key[i]
+        if in_squote:
+            buf.append(ch)
+            if ch == "\\" and i + 1 < len(sorting_key):
+                buf.append(sorting_key[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                in_squote = False
+        elif in_bquote:
+            buf.append(ch)
+            if ch == "`":
+                in_bquote = False
+        elif ch == "'":
+            in_squote = True
+            buf.append(ch)
+        elif ch == "`":
+            in_bquote = True
+            buf.append(ch)
+        elif ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            if depth > 0:
+                depth -= 1
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _parse_check_constraints(create_table_query: str) -> list[dict[str, Any]]:
+    """Extract CHECK constraints from a ``CREATE TABLE ...`` text.
+
+    Scans the column-list parenthesis for ``CONSTRAINT <name> CHECK <expr>``
+    items, tracking paren depth + quote state so commas inside function
+    calls / string literals don't split clauses.
+
+    Returns SA's ``[{'name': str, 'sqltext': str}, ...]`` shape; if no
+    CHECK constraints are present (or the column list can't be located)
+    returns ``[]``.
+    """
+    open_idx = create_table_query.find("(")
+    if open_idx == -1:
+        return []
+    depth = 0
+    in_squote = False
+    in_bquote = False
+    end_idx = -1
+    for i in range(open_idx, len(create_table_query)):
+        ch = create_table_query[i]
+        if in_squote:
+            if ch == "\\" and i + 1 < len(create_table_query):
+                continue
+            if ch == "'":
+                in_squote = False
+        elif in_bquote:
+            if ch == "`":
+                in_bquote = False
+        elif ch == "'":
+            in_squote = True
+        elif ch == "`":
+            in_bquote = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end_idx = i
+                break
+    if end_idx == -1:
+        return []
+    body = create_table_query[open_idx + 1 : end_idx]
+
+    # Split at top-level commas only (same logic as _split_sorting_key,
+    # generalised over the column-list body).
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    in_squote = False
+    in_bquote = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if in_squote:
+            buf.append(ch)
+            if ch == "\\" and i + 1 < len(body):
+                buf.append(body[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                in_squote = False
+        elif in_bquote:
+            buf.append(ch)
+            if ch == "`":
+                in_bquote = False
+        elif ch == "'":
+            in_squote = True
+            buf.append(ch)
+        elif ch == "`":
+            in_bquote = True
+            buf.append(ch)
+        elif ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    if buf:
+        parts.append("".join(buf).strip())
+
+    # Pick out the CONSTRAINT ... CHECK ... clauses.
+    out: list[dict[str, Any]] = []
+    for part in parts:
+        if not part.upper().startswith("CONSTRAINT "):
+            continue
+        # Form: CONSTRAINT <name> CHECK <expr>
+        rest = part[len("CONSTRAINT "):].lstrip()
+        # Name: identifier (possibly backtick-quoted) up to whitespace.
+        if rest.startswith("`"):
+            close = rest.find("`", 1)
+            if close == -1:
+                continue
+            name = rest[1:close]
+            rest = rest[close + 1 :].lstrip()
+        else:
+            tokens = rest.split(None, 1)
+            if len(tokens) < 2:
+                continue
+            name, rest = tokens[0], tokens[1].lstrip()
+        if not rest.upper().startswith("CHECK"):
+            continue
+        sqltext = rest[len("CHECK"):].strip()
+        out.append({"name": name, "sqltext": sqltext})
+    return out
+
+
 class ChdbReflection:
     """Pulls schema metadata out of chDB's ``system.*`` tables."""
 
@@ -96,13 +263,20 @@ class ChdbReflection:
         return [r[0] for r in rows]
 
     def get_view_names(self, connection: Any, schema: str | None) -> list[str]:
+        """Return plain views — *not* materialized views.
+
+        SA's Inspector contract: ``get_view_names`` and
+        ``get_materialized_view_names`` are disjoint. We previously used
+        ``engine LIKE '%View'`` which matched both ``View`` and
+        ``MaterializedView``, double-listing MVs across the two methods.
+        """
         db = self._db(schema)
         rows = self._exec(
             connection,
             f"""
             SELECT name FROM system.tables
             WHERE database = {db}
-              AND engine LIKE '%View'
+              AND engine = 'View'
             ORDER BY name
             """,
         )
@@ -200,11 +374,7 @@ class ChdbReflection:
         if not rows or not rows[0][0]:
             return {"constrained_columns": [], "name": None}
         sorting_key = rows[0][0]
-        # `sorting_key` is a comma-separated expression list. For the common
-        # case (plain column names) splitting by ',' is correct; for the
-        # function-call edge case we still return the literal text so the
-        # caller doesn't lose information.
-        cols = [c.strip() for c in sorting_key.split(",") if c.strip()]
+        cols = _split_sorting_key(sorting_key)
         return {"constrained_columns": cols, "name": None}
 
     # ------------------------------------------------------------------
@@ -263,8 +433,29 @@ class ChdbReflection:
     def get_check_constraints(
         self, connection: Any, table_name: str, schema: str | None
     ) -> list[dict[str, Any]]:
-        """ClickHouse doesn't enforce CHECK; return empty so SA doesn't crash."""
-        return []
+        """Return CHECK constraints declared on the table.
+
+        chDB enforces ``CHECK`` constraints (error code 469
+        VIOLATED_CONSTRAINT on insert), but doesn't expose a
+        ``system.constraints`` table — the only way to recover them is
+        to parse ``system.tables.create_table_query``. The format is::
+
+            CREATE TABLE db.tbl (`x` Int32, CONSTRAINT positive CHECK x > 0, ...)
+
+        We pull the column-list parenthesis group, scan for
+        ``CONSTRAINT <name> CHECK <expr>`` items at paren-depth 0, and
+        return SA's standard ``{'name': str, 'sqltext': str}`` shape.
+        """
+        self._require_table(connection, table_name, schema)
+        db = self._db(schema)
+        rows = self._exec(
+            connection,
+            f"SELECT create_table_query FROM system.tables WHERE database = {db} AND name = :name",
+            name=table_name,
+        )
+        if not rows or not rows[0][0]:
+            return []
+        return _parse_check_constraints(rows[0][0])
 
     def get_unique_constraints(
         self, connection: Any, table_name: str, schema: str | None
