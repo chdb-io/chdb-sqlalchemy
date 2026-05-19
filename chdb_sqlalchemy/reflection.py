@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import exc as sa_exc
 from sqlalchemy import text
 
 from .types.parser import parse_column_type
@@ -56,6 +57,17 @@ class ChdbReflection:
     def _exec(self, connection: Any, sql: str, **params: Any) -> list[tuple]:
         result = connection.execute(text(sql), params)
         return list(result.fetchall())
+
+    def _require_table(self, connection: Any, table_name: str, schema: str | None) -> None:
+        """Raise ``NoSuchTableError`` if table does not exist.
+
+        SA expects ``get_columns(missing_table)`` etc. to raise. We probe
+        ``system.tables`` and raise the standard exception.
+        """
+        if not self.has_table(connection, table_name, schema):
+            raise sa_exc.NoSuchTableError(
+                f"{schema}.{table_name}" if schema else table_name
+            )
 
     # ------------------------------------------------------------------
     # schemas / databases
@@ -125,12 +137,8 @@ class ChdbReflection:
     def get_columns(
         self, connection: Any, table_name: str, schema: str | None
     ) -> list[dict[str, Any]]:
-        """Return SQLAlchemy column metadata for ``table_name``.
-
-        The output list matches what ``Inspector.get_columns`` expects:
-        a list of dicts with ``name``, ``type``, ``nullable``, ``default``,
-        ``comment`` keys, in column-order.
-        """
+        """Return SQLAlchemy column metadata for ``table_name``."""
+        self._require_table(connection, table_name, schema)
         db = self._db(schema)
         rows = self._exec(
             connection,
@@ -178,14 +186,8 @@ class ChdbReflection:
     def get_pk_constraint(
         self, connection: Any, table_name: str, schema: str | None
     ) -> dict[str, Any]:
-        """Return the table's sorting key as a faux PK.
-
-        ClickHouse has no true PK constraint. Most analyst-flavoured tooling
-        (Superset, LangChain text-to-SQL prompts, Django introspection) expects
-        *some* PK to identify the row's primary access pattern, and the
-        MergeTree ``ORDER BY`` is the closest semantic match — it is what
-        chDB actually sorts by on disk.
-        """
+        """Return the table's sorting key as a faux PK."""
+        self._require_table(connection, table_name, schema)
         db = self._db(schema)
         rows = self._exec(
             connection,
@@ -209,17 +211,72 @@ class ChdbReflection:
     # indexes (data-skipping)
     # ------------------------------------------------------------------
 
+    def get_table_comment(
+        self, connection: Any, table_name: str, schema: str | None
+    ) -> dict[str, Any]:
+        """Return the table's comment as ``{'text': str | None}``."""
+        self._require_table(connection, table_name, schema)
+        db = self._db(schema)
+        rows = self._exec(
+            connection,
+            f"SELECT comment FROM system.tables WHERE database = {db} AND name = :name",
+            name=table_name,
+        )
+        if not rows:
+            return {"text": None}
+        return {"text": rows[0][0] or None}
+
+    def get_view_definition(
+        self, connection: Any, view_name: str, schema: str | None
+    ) -> str:
+        """Return the SQL for a view."""
+        db = self._db(schema)
+        rows = self._exec(
+            connection,
+            f"SELECT create_table_query FROM system.tables "
+            f"WHERE database = {db} AND name = :name",
+            name=view_name,
+        )
+        if not rows or not rows[0][0]:
+            raise __import__("sqlalchemy").exc.NoSuchTableError(view_name)
+        return rows[0][0]
+
+    def get_materialized_view_names(
+        self, connection: Any, schema: str | None
+    ) -> list[str]:
+        """Return MaterializedView names — separate from regular views."""
+        db = self._db(schema)
+        rows = self._exec(
+            connection,
+            f"SELECT name FROM system.tables "
+            f"WHERE database = {db} AND engine = 'MaterializedView' "
+            f"ORDER BY name",
+        )
+        return [r[0] for r in rows]
+
+    def get_temp_view_names(
+        self, connection: Any, schema: str | None
+    ) -> list[str]:
+        """Temp views — chDB doesn't really do these; return empty."""
+        return []
+
+    def get_check_constraints(
+        self, connection: Any, table_name: str, schema: str | None
+    ) -> list[dict[str, Any]]:
+        """ClickHouse doesn't enforce CHECK; return empty so SA doesn't crash."""
+        return []
+
+    def get_unique_constraints(
+        self, connection: Any, table_name: str, schema: str | None
+    ) -> list[dict[str, Any]]:
+        """ClickHouse has no UNIQUE; return empty."""
+        return []
+
     def get_indexes(
         self, connection: Any, table_name: str, schema: str | None
     ) -> list[dict[str, Any]]:
-        """Return data-skipping indexes declared on the table.
-
-        ClickHouse's secondary indexes (``minmax``, ``set``, ``bloom_filter``,
-        ``ngrambf_v1``, ``tokenbf_v1``, ``hypothesis``) aren't B-tree indexes —
-        they're block-level filters. We surface them so tools that consume
-        ``Inspector.get_indexes()`` see the same shape they'd see for a
-        Postgres BRIN-like index.
-        """
+        """Return data-skipping indexes declared on the table."""
+        self._require_table(connection, table_name, schema)
         db = self._db(schema)
         rows = self._exec(
             connection,

@@ -46,7 +46,7 @@ def _json_processor(value: Any) -> Any:
 class JSON(types.JSON, _ChdbType):
     __visit_name__ = "JSON"
 
-    def result_processor(  # type: ignore[override]
+    def result_processor(
         self, dialect: Any, coltype: Any
     ) -> Callable[[Any], Any]:
         return _json_processor
@@ -57,7 +57,7 @@ class JSONLegacy(types.JSON, _ChdbType):
 
     __visit_name__ = "JSONLegacy"
 
-    def result_processor(  # type: ignore[override]
+    def result_processor(
         self, dialect: Any, coltype: Any
     ) -> Callable[[Any], Any]:
         return _json_processor
