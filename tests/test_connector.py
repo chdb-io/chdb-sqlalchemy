@@ -32,15 +32,29 @@ def test_relative_path():
 
 
 def test_readonly_query_param():
+    # readonly is stashed under the post-connect-settings sentinel — NOT
+    # passed as a top-level kwarg, because chdb.dbapi.connect rejects it.
     args = url_to_connect_args(make_url("chdb:////tmp/foo?readonly=1"))
-    assert args["readonly"] is True
+    from chdb_sqlalchemy.connector import _POST_CONNECT_SETTINGS_KEY
+    assert "readonly" not in args
+    assert args[_POST_CONNECT_SETTINGS_KEY] == {"readonly": "1"}
 
 
 def test_settings_query_param():
     args = url_to_connect_args(
         make_url("chdb:////tmp/foo?settings=max_memory_usage%3D10G&settings=max_threads%3D4")
     )
-    assert args["settings"] == {"max_memory_usage": "10G", "max_threads": "4"}
+    from chdb_sqlalchemy.connector import _POST_CONNECT_SETTINGS_KEY
+    assert "settings" not in args
+    assert args[_POST_CONNECT_SETTINGS_KEY] == {
+        "max_memory_usage": "10G",
+        "max_threads": "4",
+    }
+
+
+def test_unknown_query_param_rejected():
+    with pytest.raises(ChdbUriError, match="Unknown URI query parameter"):
+        url_to_connect_args(make_url("chdb:////tmp/foo?bogus=x"))
 
 
 def test_host_rejected():

@@ -1,11 +1,11 @@
-# ClickHouse 26.3.9.8-lts type baseline
+# ClickHouse 26.3.9 (LTS) type baseline
 
 This file freezes the set of types `chdb-sqlalchemy` claims to support against
-the chDB / ClickHouse 26.3.9.8-lts mainline.
+the chDB / ClickHouse 26.3.9 (LTS) mainline.
 
 ## Regenerating
 
-Against a running ClickHouse 26.3.9.8 instance:
+Against a running ClickHouse 26.3.9.x instance:
 
 ```bash
 clickhouse-client --query "

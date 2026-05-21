@@ -26,6 +26,11 @@ from .exc import ChdbUriError
 # Sentinel path that chdb.dbapi recognises for an ephemeral in-memory session.
 IN_MEMORY = ":memory:"
 
+# Private kwarg name used to pass post-connect ``SET`` commands through
+# SA's ``create_connect_args`` machinery. The shim pops it before calling
+# the underlying ``chdb.dbapi.connect``, so it never reaches the driver.
+_POST_CONNECT_SETTINGS_KEY = "_chdb_post_connect_settings"
+
 
 _PEP249_EXCEPTIONS = (
     "Warning",
@@ -64,9 +69,34 @@ class _DbapiShim:
         self._mod = mod
 
     def connect(self, *args: Any, **kwargs: Any) -> Any:
+        """Open a chDB connection. ``chdb.dbapi.Connection.__init__`` only
+        accepts ``path=``; ``readonly`` and ``settings`` from the URI are
+        applied **post-connect** via ``SET`` cursor statements (chdb.dbapi
+        rejects them as ``__init__`` kwargs)."""
         from ._cursor import wrap_connection
 
+        post_connect_settings = kwargs.pop(_POST_CONNECT_SETTINGS_KEY, None)
+
         raw = self._mod.connect(*args, **kwargs)
+
+        if post_connect_settings:
+            cur = raw.cursor()
+            try:
+                for key, value in post_connect_settings.items():
+                    # SET key = value — chDB Session settings (max_threads,
+                    # readonly, max_memory_usage, …). Boolean-like values
+                    # are emitted as bare ints; everything else quoted.
+                    if isinstance(value, bool):
+                        v_sql = "1" if value else "0"
+                    elif isinstance(value, (int, float)):
+                        v_sql = str(value)
+                    else:
+                        escaped = str(value).replace("'", "''")
+                        v_sql = f"'{escaped}'"
+                    cur.execute(f"SET {key} = {v_sql}")
+            finally:
+                cur.close()
+
         return wrap_connection(raw)
 
     def __getattr__(self, name: str) -> Any:
@@ -163,19 +193,33 @@ def url_to_connect_args(url: URL) -> dict[str, Any]:
 
     kwargs: dict[str, Any] = {"path": path}
 
-    # Forward known query-string knobs to chdb.dbapi.connect.
-    # Unknown keys are passed through verbatim so future chDB additions work
-    # without a chdb-sqlalchemy release.
+    # ``?readonly=1`` and ``?settings=k=v&settings=k=v`` are applied
+    # post-connect via ``SET`` statements, because
+    # ``chdb.dbapi.Connection.__init__`` only accepts ``path=`` and
+    # rejects every other kwarg with TypeError. We gather them in
+    # ``_POST_CONNECT_SETTINGS_KEY`` and the shim's ``connect()`` pops
+    # the value before calling the real driver.
     query = dict(url.query)
+    post_connect: dict[str, str] = {}
     if "readonly" in query:
-        kwargs["readonly"] = query.pop("readonly") in ("1", "true", "True")
+        readonly_raw = query.pop("readonly")
+        post_connect["readonly"] = "1" if readonly_raw in ("1", "true", "True") else "0"
     # 'settings' is a multi-value field: settings=max_memory_usage=10G&settings=...
     settings = query.pop("settings", None)
     if settings is not None:
         settings_list = [settings] if isinstance(settings, str) else list(settings)
-        kwargs["settings"] = _parse_settings_list(settings_list)
-    # Anything left over goes through as-is (forward compatibility).
-    kwargs.update(query)
+        post_connect.update(_parse_settings_list(settings_list))
+    if post_connect:
+        kwargs[_POST_CONNECT_SETTINGS_KEY] = post_connect
+    # Anything else left in the URI query string is not a documented knob —
+    # raise rather than silently forwarding to chdb.dbapi.connect (which
+    # would TypeError anyway, since it only accepts ``path``).
+    if query:
+        unknown = ", ".join(sorted(query))
+        raise ChdbUriError(
+            f"Unknown URI query parameter(s): {unknown}. "
+            "Supported: readonly, settings."
+        )
     return kwargs
 
 

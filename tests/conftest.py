@@ -63,6 +63,45 @@ def chdb_available() -> bool:
     return _have_chdb()
 
 
+def _drop_all_user_tables(eng) -> None:
+    """Clear chDB process-global state at the start of each test.
+
+    ``chdb:///:memory:`` shares its database across engines whenever
+    another connection is alive in the same process (a common situation
+    in a pytest run). Fixtures with overlapping ``create_engine`` calls
+    end up seeing each other's tables, so a CREATE in one test can hit
+    TABLE_ALREADY_EXISTS in the next. Sweeping ``currentDatabase()`` of
+    user tables on fixture entry makes each test see a clean schema
+    regardless of run order.
+    """
+    import contextlib
+
+    from sqlalchemy import text as _text
+
+    names: list[str] = []
+    with eng.connect() as conn, contextlib.suppress(Exception):
+        names = [
+            r[0]
+            for r in conn.execute(
+                _text(
+                    "SELECT name FROM system.tables "
+                    "WHERE database = currentDatabase() "
+                    "AND engine NOT IN ('SystemNumbers', 'SystemOne')"
+                )
+            ).fetchall()
+        ]
+    if not names:
+        return
+    import contextlib
+
+    with eng.begin() as conn:
+        for name in names:
+            # Best-effort cleanup; a failure here shouldn't mask the
+            # actual test that's about to run.
+            with contextlib.suppress(Exception):
+                conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{name}`")
+
+
 @pytest.fixture
 def engine(chdb_available):
     """An in-memory chDB SQLAlchemy engine.
@@ -74,6 +113,7 @@ def engine(chdb_available):
     from sqlalchemy import create_engine
 
     eng = create_engine("chdb:///:memory:")
+    _drop_all_user_tables(eng)
     yield eng
     eng.dispose()
 
@@ -95,6 +135,39 @@ def persistent_engine(chdb_available) -> Iterator:
         eng.dispose()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@pytest.fixture
+def permissive_engine(chdb_available):
+    """Engine with chDB experimental-feature flags enabled.
+
+    Several ClickHouse types that ``docs/types.md`` claims to support are
+    gated behind ``allow_experimental_*`` / ``allow_suspicious_*`` settings
+    in the 26.3 LTS line. The torture suite needs them all on so it can
+    exercise every documented type end-to-end. Each test that uses this
+    fixture is implicitly testing "does our dialect handle the flagged
+    types" — without these flags chDB rejects the DDL itself.
+    """
+    if not chdb_available:
+        pytest.skip("chDB not installed; skipping engine-backed test")
+    from sqlalchemy import create_engine
+
+    from chdb_sqlalchemy.connector import _POST_CONNECT_SETTINGS_KEY
+
+    eng = create_engine(
+        "chdb:///:memory:",
+        connect_args={
+            _POST_CONNECT_SETTINGS_KEY: {
+                "allow_suspicious_low_cardinality_types": "1",
+                "allow_experimental_variant_type": "1",
+                "allow_experimental_dynamic_type": "1",
+                "allow_experimental_json_type": "1",
+            }
+        },
+    )
+    _drop_all_user_tables(eng)
+    yield eng
+    eng.dispose()
 
 
 @pytest.fixture

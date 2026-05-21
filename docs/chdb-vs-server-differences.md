@@ -1,6 +1,6 @@
 # chDB vs ClickHouse server — documented semantic differences
 
-Diffs we know about between `chdb:///` and a `clickhouse-server:26.3.9.8-lts`
+Diffs we know about between `chdb:///` and a `clickhouse-server:26.3.9-lts`
 running the same query. **Bugs are not listed here** — bugs go to the issue
 tracker and CI must turn red. This file is for *intentional* deltas only.
 
