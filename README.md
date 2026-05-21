@@ -4,7 +4,7 @@
 
 `chdb-sqlalchemy` lets you use chDB as a SQLAlchemy backend, which in turn unlocks every Python data stack that already speaks SQLAlchemy: Django ORM, Flask-SQLAlchemy, `pandas.read_sql()`, Apache Superset, LangChain's `SQLDatabaseToolkit`, CrewAI's `NL2SQLTool`, and more.
 
-> **v0.1.0a1 alpha is live on TestPyPI** — https://test.pypi.org/project/chdb-sqlalchemy/0.1.0a1/
+> **v0.2.0 is live on PyPI** — https://pypi.org/project/chdb-sqlalchemy/
 
 ## What this is
 
