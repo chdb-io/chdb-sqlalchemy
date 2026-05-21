@@ -50,6 +50,7 @@ test-integration = [
     "vcrpy>=6.0",
     "anthropic>=0.40",
     "langchain-anthropic>=0.3",
+    "crewai-tools>=0.12",
 ]
 test-differential = [
     "clickhouse-driver>=0.2.9",

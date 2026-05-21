@@ -31,12 +31,132 @@ from __future__ import annotations
 import ast
 import decimal as _decimal
 import json
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
 # Type-string prefix → row converter.
 # Order matters: more specific prefixes must come before broader ones.
 _COMPOSITE_PREFIXES = ("Array(", "Map(", "Tuple(", "Nested(")
+
+
+# ----------------------------------------------------------------------
+# CrewAI NL2SQLTool compatibility shim
+# ----------------------------------------------------------------------
+#
+# CrewAI's ``NL2SQLTool`` (crewAIInc/crewAI-tools
+# ``crewai_tools/tools/nl2sql/nl2sql_tool.py``) emits two hardcoded
+# PostgreSQL-style introspection queries that misbehave against chDB:
+#
+# 1. ``_fetch_available_tables()`` (line 48 at time of writing):
+#
+#        SELECT table_name FROM information_schema.tables
+#        WHERE table_schema = 'public';
+#
+#    chDB has ``information_schema.tables`` but stores user tables under
+#    ``table_schema = currentDatabase()``. The literal ``'public'`` filter
+#    returns zero rows → agent silently sees empty schema → useless output.
+#    **Fix:** rewrite ``'public'`` → ``currentDatabase()`` so the session's
+#    own tables are visible.
+#
+# 2. ``_fetch_all_available_columns(table_name)`` (line 53):
+#
+#        SELECT column_name, data_type FROM information_schema.columns
+#        WHERE table_name = '<name>';
+#
+#    The query filters only by table name. If two databases each have a
+#    table named e.g. ``crew_orders``, chDB's ``information_schema.columns``
+#    returns the union of both column sets — the agent's NL2SQL prompt then
+#    sees a phantom schema that mixes columns from a sibling database.
+#    **Fix:** append ``AND table_schema = currentDatabase()`` to scope to
+#    the session's own database.
+#
+# Design choices for both rewrites:
+#
+# * ``currentDatabase()`` (not a hardcoded ``'default'``) so the shim
+#   follows the session's actual database — including persistent sessions
+#   and explicit ``USE other_db`` statements.
+#
+# * Anchored, whitespace-tolerant regex matching the exact CrewAI query
+#   shape, not a broad substitution. This avoids false-positives on user
+#   queries that happen to mention ``information_schema``, ``'public'``,
+#   or ``column_name`` for unrelated reasons.
+#
+# * The shim is intentionally upstream-fragile: if CrewAI changes either
+#   query shape (re-formats the SQL, adds columns, switches to SA
+#   Inspector, etc.) the regex will no longer match and the original
+#   silent-failure modes return. The canary test in
+#   ``tests/integration/test_crewai_compat.py::test_crewai_query_shape_unchanged``
+#   inspects the upstream CrewAI source and fails LOUDLY with a pointer
+#   to this file when the pattern drifts.
+#
+# When that test fails: re-read the new CrewAI source, decide whether to
+# update the regexes below (still PG-style → keep shim, adapt pattern) or
+# remove the shim entirely (CrewAI now uses SA Inspector → no shim needed,
+# just delete this block and the tests).
+_CREWAI_PG_PUBLIC_TABLES_QUERY = re.compile(
+    r"^\s*SELECT\s+table_name\s+FROM\s+information_schema\.tables\s+"
+    r"WHERE\s+table_schema\s*=\s*'public'\s*;?\s*$",
+    re.IGNORECASE,
+)
+
+
+# Group 1 captures everything from SELECT through the closing of the
+# table_name comparand; group 2 captures any trailing whitespace + optional
+# semicolon. The comparand can be:
+#
+# * a single-quoted literal (older crewai-tools <= ~1.14 inlined the table
+#   name via f-string):
+#       ``WHERE table_name = 'crew_orders'``
+#
+# * a chdb.dbapi qmark placeholder (newer crewai-tools uses SA bind params
+#   ``:table_name`` which SA converts to ``?`` at this cursor layer):
+#       ``WHERE table_name = ?``
+#
+# Both forms must be rewritten — the cross-database leak exists in either
+# case because neither version filters by schema. We insert the schema
+# filter between groups 1 and 2 so the result is
+# ``... WHERE table_name = <comparand> AND table_schema = currentDatabase();``.
+# The bind-parameter array (passed alongside the SQL) is untouched, so its
+# ``?`` ↔ value mapping remains valid.
+_CREWAI_PG_COLUMNS_QUERY = re.compile(
+    r"^(\s*SELECT\s+column_name\s*,\s*data_type\s+FROM\s+information_schema\.columns\s+"
+    r"WHERE\s+table_name\s*=\s*(?:'[^']*'|\?))(\s*;?\s*)$",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_crewai_public_schema(sql: str) -> str:
+    """Rewrite CrewAI's hardcoded PG-style ``'public'`` filter on
+    ``information_schema.tables`` to ``currentDatabase()``.
+
+    Returns the SQL unchanged unless it matches the exact CrewAI
+    ``_fetch_available_tables()`` query shape.
+    """
+    if _CREWAI_PG_PUBLIC_TABLES_QUERY.match(sql):
+        return sql.replace("'public'", "currentDatabase()", 1)
+    return sql
+
+
+def _rewrite_crewai_columns_filter(sql: str) -> str:
+    """Append ``AND table_schema = currentDatabase()`` to CrewAI's
+    ``information_schema.columns`` query so same-named tables in sibling
+    databases don't leak their columns into the agent's schema prompt.
+
+    Returns the SQL unchanged unless it matches the exact CrewAI
+    ``_fetch_all_available_columns()`` query shape.
+    """
+    m = _CREWAI_PG_COLUMNS_QUERY.match(sql)
+    if m is None:
+        return sql
+    return f"{m.group(1)} AND table_schema = currentDatabase(){m.group(2)}"
+
+
+def _apply_crewai_compat_rewrites(sql: str) -> str:
+    """Apply every CrewAI compatibility rewrite. No-op for non-matching SQL."""
+    sql = _rewrite_crewai_public_schema(sql)
+    sql = _rewrite_crewai_columns_filter(sql)
+    return sql
 
 
 def _coerce_int(v: Any) -> Any:
@@ -269,12 +389,14 @@ class _CursorWrapper:
 
     def execute(self, statement: str, parameters: Any = None) -> Any:
         self._converters = None  # recompute on next fetch
+        statement = _apply_crewai_compat_rewrites(statement)
         if parameters is None:
             return self._cur.execute(statement)
         return self._cur.execute(statement, parameters)
 
     def executemany(self, statement: str, seq_of_params: Any) -> Any:
         self._converters = None
+        statement = _apply_crewai_compat_rewrites(statement)
         return self._cur.executemany(statement, seq_of_params)
 
     def callproc(self, procname: str, parameters: Any = None) -> Any:
