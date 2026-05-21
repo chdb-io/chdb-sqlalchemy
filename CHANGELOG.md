@@ -4,6 +4,54 @@ All notable changes to `chdb-sqlalchemy` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-05-21
+
+### Added
+
+- **CrewAI `NL2SQLTool` compatibility** (#9) — finally delivers the
+  CrewAI half of the v0.2 milestone. CrewAI's `NL2SQLTool` emits two
+  PostgreSQL-style introspection queries that silently misbehaved
+  against chDB in 0.2.0:
+  - `_fetch_available_tables()` filtered by `table_schema = 'public'`,
+    which doesn't exist in chDB → agent saw an empty schema → useless
+    LLM output, no error.
+  - `_fetch_all_available_columns(table_name)` filtered only by
+    `table_name`, so same-named tables in sibling databases leaked
+    their columns into the agent's NL2SQL prompt → LLM hallucinated
+    SQL referencing nonexistent columns.
+
+  Both are now rewritten transparently in `_CursorWrapper.execute`:
+  `'public'` → `currentDatabase()` for the tables query, and
+  `AND table_schema = currentDatabase()` appended to the columns query
+  (matches both the legacy literal form and the SA bind-param `?`
+  form used by current crewai-tools 1.14+).
+
+  The rewrites are intentionally upstream-fragile (narrow anchored
+  regexes targeting the exact CrewAI query shapes) and paired with a
+  canary test that inspects `crewai_tools` source and fails loudly
+  with a pointer back to the shim file when CrewAI changes upstream.
+
+- `crewai-tools` added to `test-integration` extras for end-to-end
+  coverage of the above.
+
+### Infrastructure
+
+- **Tag-triggered PyPI publish workflow** (#10) — pushing a `v*` tag
+  to `chdb-io/chdb-sqlalchemy` now automatically builds, validates,
+  and publishes to PyPI + creates the GitHub Release with attached
+  wheel + sdist. Modeled on chdb-io/chdb's wheel-publish workflow,
+  simplified for pure-Python single-wheel distribution. Includes a
+  pre-build cross-check that the tag's version equals the version in
+  `pyproject.toml` — refuses to upload on mismatch.
+
+### Fixed
+
+- README banner (#8) — corrected from the stale `v0.1.0a1 alpha is
+  live on TestPyPI` notice (left over from the 0.1.0a1 scaffolding)
+  to point at the v0.2.0 production PyPI release. The PyPI
+  description for 0.2.0 is a frozen snapshot and cannot be edited
+  retroactively; 0.2.1's PyPI description tab will reflect this fix.
+
 ## [0.2.0] — 2026-05-21
 
 ### Fixed (bug surfaced by L5 differential vs ClickHouse 26.3.9 (LTS))
