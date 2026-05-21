@@ -4,7 +4,7 @@ All notable changes to `chdb-sqlalchemy` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-05-21
 
 ### Fixed (bug surfaced by L5 differential vs ClickHouse 26.3.9 (LTS))
 
@@ -92,14 +92,3 @@ Each would have broken a category of LLM use cases silently or noisily:
 - Documentation: `docs/types.md`, `docs/types-baseline.md`,
   `docs/known-skips.md`, `docs/chdb-vs-server-differences.md`
 
-## [0.1.0] — TBD
-
-First public release. Unblocks `langchain-chdb` v0.1 by exposing
-`chdb:///` as a SQLAlchemy URL scheme that `SQLDatabase.from_uri()` and
-`pandas.read_sql()` can consume.
-
-## [0.2.0] — TBD
-
-Full LangChain `SQLDatabaseToolkit` and CrewAI `NL2SQLTool` certification.
-L4 end-to-end scenarios filled in, L5 differential matrix green, L6 perf
-thresholds enforced, L7 fuzz 24h-clean.
