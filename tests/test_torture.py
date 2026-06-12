@@ -23,9 +23,9 @@ Organisation (one section = one hypothesis bucket):
 7. ``TestSQLInjectionShape`` — strings whose contents look like SQL
    fragments must survive INSERT/SELECT verbatim.
 8. ``TestKnownDivergence`` — locks in the surprises probing surfaced:
-   Float NaN → None, DateTime naive-string TZ shift, DateTime64(9)
-   microsecond truncation, etc. Each is an explicit assertion so a
-   silent behavior change in chDB shows up as a failing test.
+   DateTime naive-string TZ shift, DateTime64(9) microsecond truncation,
+   etc. Each is an explicit assertion so a silent behavior change in
+   chDB shows up as a failing test.
 
 Each test is parametrised tightly so a regression report names the
 specific case (e.g. ``[NUL-byte-mid]``) rather than ``test_strings``.
@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
+import math
 
 import pytest
 from sqlalchemy import Engine, inspect, text
@@ -501,14 +502,13 @@ def test_decimal_18_4_full_precision(engine):
     assert got == expected
 
 
-def test_decimal_38_high_precision_is_lossy(engine):
-    """``Decimal(38, 10)`` cells lose precision past ~17 significant digits.
+def test_decimal_38_high_precision_round_trip(engine):
+    """``Decimal(38, 10)`` cells preserve full precision through chdb.dbapi.
 
-    chDB.dbapi appears to route Decimal cells through a double-precision
-    float conversion in some code path, so values whose magnitude exceeds
-    ~2**53 come back rounded. We can verify the *stored* value is full
-    precision by selecting ``toString(x)`` — only the cell returned via
-    the typed accessor is lossy. Lock the gap so users aren't surprised.
+    chdb-core ≤26.3 routed Decimal cells through a double-precision float
+    conversion, so values whose magnitude exceeded ~2**53 came back rounded
+    (chdb-io/chdb#574). chdb-core 26.5 (ClickHouse 26.5 baseline) fixed
+    the round-trip; this test locks the fix and fails on older cores.
     """
     raw = "1234567890123456789012345678.0123456789"
     with engine.begin() as conn:
@@ -516,13 +516,8 @@ def test_decimal_38_high_precision_is_lossy(engine):
         conn.execute(text(f"INSERT INTO big_dec VALUES ({raw})"))
         cell = conn.execute(text("SELECT x FROM big_dec")).scalar()
         stringified = conn.execute(text("SELECT toString(x) FROM big_dec")).scalar()
-    # Server-side full-precision is fine
     assert stringified == raw
-    # But the Python cell is lossy — exact value mismatch is the bug we lock in
-    assert cell != decimal.Decimal(raw), (
-        "chDB.dbapi now preserves Decimal(38) full precision — drop the "
-        "lossy-coercion notice from docs and remove this test."
-    )
+    assert cell == decimal.Decimal(raw)
 
 
 def test_decimal_negative_zero(engine):
@@ -665,6 +660,77 @@ def test_nested_round_trip(engine):
     assert rows[1] == [1.0, 2.0, 3.0]
 
 
+# chdb-core 26.5 (ClickHouse 26.5 baseline) serialises Float / Decimal /
+# temporal leaves *inside* composite cells as quoted strings — e.g.
+# ``Array(Float64)`` arrives as ``"['1.5', '2.5']"`` where chdb-core 26.3
+# emitted bare numerics. The cursor wrapper repairs the leaves using the
+# column's type string; these tests lock the repair for each composite
+# shape that regressed in CI when chdb-core 26.5.0 shipped (2026-06-08).
+
+
+def test_array_of_floats_native(engine):
+    got = _roundtrip(engine, "Array(Float64)", "[1.0, 2.5, 3.25]")
+    assert got == [1.0, 2.5, 3.25]
+    assert all(isinstance(x, float) for x in got)
+
+
+def test_array_of_floats_with_specials_native(engine):
+    got = _roundtrip(engine, "Array(Float64)", "[nan, inf, -inf, 1.5]")
+    assert isinstance(got, list) and len(got) == 4
+    assert math.isnan(got[0])
+    assert got[1:] == [math.inf, -math.inf, 1.5]
+
+
+def test_array_nullable_float_keeps_nulls(engine):
+    got = _roundtrip(engine, "Array(Nullable(Float64))", "[1.5, NULL]")
+    assert got == [1.5, None]
+
+
+def test_array_of_decimals_native(engine):
+    got = _roundtrip(engine, "Array(Decimal(18, 2))", "[toDecimal64('1.23', 2)]")
+    assert got == [decimal.Decimal("1.23")]
+    assert isinstance(got[0], decimal.Decimal)
+
+
+def test_array_of_dates_native(engine):
+    got = _roundtrip(engine, "Array(Date)", "[toDate('2024-01-02')]")
+    assert got == [dt.date(2024, 1, 2)]
+
+
+def test_map_float_values_native(engine):
+    got = _roundtrip(engine, "Map(String, Float64)", "map('k', 1.5)")
+    assert got == {"k": 1.5}
+    assert isinstance(got["k"], float)
+
+
+def test_named_tuple_returns_dict_with_native_leaves(engine):
+    """chdb.dbapi serialises *named* Tuple cells as dicts keyed by field.
+
+    The wrapper keeps the dict shape (it carries strictly more information
+    than a bare tuple) and coerces each field by its declared type.
+    """
+    got = _roundtrip(
+        engine,
+        "Tuple(a Float64, b String)",
+        "CAST((1.5, 'x'), 'Tuple(a Float64, b String)')",
+    )
+    assert got == {"a": 1.5, "b": "x"}
+    assert isinstance(got["a"], float)
+
+
+def test_array_of_tuples_native_leaves(engine):
+    got = _roundtrip(engine, "Array(Tuple(UInt8, Float64))", "[(1, 2.5)]")
+    assert isinstance(got, list) and len(got) == 1
+    assert list(got[0]) == [1, 2.5]
+    assert isinstance(list(got[0])[1], float)
+
+
+def test_geo_ring_floats_native(engine):
+    got = _roundtrip(engine, "Ring", "[(0.25, 0.5), (1.25, 1.5)]")
+    assert got == [[0.25, 0.5], [1.25, 1.5]]
+    assert all(isinstance(c, float) for point in got for c in point)
+
+
 def test_low_cardinality_nullable_int_round_trip(permissive_engine):
     """Fix #5 territory: LC(Nullable(Int32)) — wrapper must coerce inner.
 
@@ -803,21 +869,20 @@ def test_sql_injection_shape_stored_as_data(engine, value):
     ("value_sql", "label"),
     [("nan", "NaN"), ("inf", "+Inf"), ("-inf", "-Inf")],
 )
-def test_float_special_values_come_back_as_none(engine, value_sql, label):
-    """chDB 26.3 lossifies NaN / ±Inf to None on readback.
+def test_float_special_values_round_trip(engine, value_sql, label):
+    """NaN / ±Inf survive Float64 readback as real floats.
 
-    This is a chDB.dbapi binding quirk — the TabSeparated format would
-    return ``nan``/``inf``/``-inf`` as strings, but the Python binding
-    folds them all to ``None``. Tests lock in the behavior so users
-    aren't surprised; if chDB upstream fixes it, this test goes red and
-    we can update our cursor wrapper to surface the real value.
+    chdb-core ≤26.3 folded all three to ``None`` on readback
+    (chdb-io/chdb#575); chdb-core 26.5 (ClickHouse 26.5 baseline)
+    serialises them faithfully. This test locks the fixed behavior and
+    fails on older cores.
     """
     got = _roundtrip(engine, "Float64", value_sql)
-    assert got is None, (
-        f"Expected None for {label} (chDB 26.3 quirk); got {got!r}. "
-        "If chDB upstream fixed Float special-value serialisation, "
-        "update _coerce_float and remove this test."
-    )
+    assert isinstance(got, float), f"Expected float for {label}; got {got!r}"
+    if label == "NaN":
+        assert math.isnan(got)
+    else:
+        assert got == float(value_sql)
 
 
 def test_geo_point_returns_tuple_not_list(engine):

@@ -142,17 +142,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Extract clickhouse binary from LTS image
+      - name: Extract clickhouse binary from server image
         run: |
-          # Try tags from most-specific to least-specific. ClickHouse's
-          # Docker Hub publishes some patch tags (``X.Y.Z.W-lts``) and
-          # rolling tags (``X.Y-lts``, ``lts``). The patch-specific tag
-          # may rotate out, so fall back to the rolling tags. The
-          # differential test's own version check ([:3] of version())
-          # will surface any unexpected major.minor.patch drift as a
-          # test failure rather than a silent pass.
+          # The tag must track chdb-core's ClickHouse baseline (26.5.1 as
+          # of chdb-core 26.5.0) — the differential test's own version
+          # check ([:3] of version()) fails loudly on drift, so a chdb
+          # baseline bump shows up here as a red version-skew test, not a
+          # silent pass. Try tags from most-specific to least-specific:
+          # patch tags (``X.Y.Z.W``) may rotate out, so fall back to the
+          # rolling ``X.Y.Z`` / ``X.Y`` tags.
           set -e
-          for tag in "26.3.9.8-lts" "26.3-lts" "lts" "26.3.9.8" "26.3"; do
+          for tag in "26.5.1.882" "26.5.1" "26.5"; do
             if docker pull "clickhouse/clickhouse-server:$tag" 2>/dev/null; then
               echo "Using clickhouse/clickhouse-server:$tag"
               docker create --name ch-extract "clickhouse/clickhouse-server:$tag"
