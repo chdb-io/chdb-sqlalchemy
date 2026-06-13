@@ -4,6 +4,48 @@ All notable changes to `chdb-sqlalchemy` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-06-12
+
+Compatibility release for chdb-core 26.5.0 (the ClickHouse 26.5
+baseline), which changed three behaviors that chdb-core 26.3 had and
+turned the nightly CI red from 2026-06-08. All fixes are
+backward-compatible: the cursor coercions are no-ops on chdb-core 26.3
+native values.
+
+### Fixed
+
+- **Composite cells lost numeric typing on chdb-core 26.5** — the new
+  binary serialises Float / Decimal / temporal leaves *inside*
+  `Array` / `Tuple` / `Map` / `Nested` / geo cells as quoted strings
+  (`"['1.5', '2.5']"` for `Array(Float64)`), where 26.3 emitted bare
+  numerics. The cursor wrapper now walks composite cells recursively,
+  driven by the column's ClickHouse type string, and re-coerces leaves
+  to native `float` / `Decimal` / `int` / `date` / `datetime` / `time`.
+  Container shapes are preserved exactly as parsed; named `Tuple`
+  cells (which chdb.dbapi returns as dicts keyed by field name) keep
+  the dict shape with coerced values.
+- **PK reflection returned `['(user_id)']` on ClickHouse 26.5** — the
+  server now preserves wrapping parentheses around a single-column
+  sorting key in `system.tables.sorting_key` (`ORDER BY (user_id)`
+  used to be reported as `user_id`). Reflection strips parens that
+  wrap the entire expression before splitting, so
+  `get_pk_constraint` returns bare column names on both server
+  generations.
+
+### Changed
+
+- **Decimal high-precision lock inverted** — chdb-core 26.5 fixed the
+  double round-trip that lossified `Decimal(P>18)` cells
+  (chdb-io/chdb#574). The torture test that locked the lossy behavior
+  now asserts full-precision round-trip instead.
+- **Float NaN / ±Inf lock inverted** — chdb-core 26.5 fixed the fold
+  to `None` on readback (chdb-io/chdb#575). The torture test now
+  asserts the values come back as real floats.
+- L5 differential reference binary bumped from
+  `clickhouse-server:26.3.9.8-lts` to `clickhouse-server:26.5.1.882`
+  to match the chdb-core 26.5 baseline; the version-skew sanity test
+  guards the pairing.
+
 ## [0.2.1] — 2026-05-21
 
 ### Added

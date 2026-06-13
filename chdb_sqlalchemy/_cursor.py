@@ -2,13 +2,19 @@
 
 Why this layer exists:
 
-``chdb.dbapi`` (chdb 4.x, ClickHouse 26.3) returns several categories of
-values in non-native forms:
+``chdb.dbapi`` (chdb 4.x) returns several categories of values in
+non-native forms; the exact set depends on the chdb-core binary:
 
-* ``Decimal(P, S)`` cells come back as ``str`` (always)
-* ``Nullable(<numeric>)`` cells come back as ``str`` for non-NULL
 * ``Array(T)`` / ``Map(K, V)`` / ``Tuple(...)`` / ``JSON`` cells come back
   as **Python repr-style strings** (e.g. ``"['a', 'b']"``, ``"{'k': 'v'}"``)
+  on every chdb-core version
+* chdb-core 26.5+ (ClickHouse 26.5 baseline) additionally quotes Float /
+  Decimal / temporal leaves *inside* those composite strings
+  (``"['1.5', '2.5']"`` for ``Array(Float64)``) where 26.3 emitted bare
+  numerics
+* chdb-core ≤26.3 returned scalar ``Decimal(P, S)`` and
+  ``Nullable(<numeric>)`` cells as ``str``; 26.5 returns natives — the
+  coercers here are no-ops on native input, so both generations work
 
 SQLAlchemy's per-type ``result_processor`` machinery only fires when the
 column type is known at compile time. For raw ``text()`` queries — which
@@ -266,37 +272,15 @@ def _coerce_literal(v: Any) -> Any:
         return v
 
 
-def _coerce_tuple(v: Any) -> Any:
-    """Same as :func:`_coerce_literal` but returns ``tuple`` not ``list``.
+def _peel_wrappers(type_str: str) -> str:
+    """Strip outer ``Nullable`` / ``LowCardinality`` wrappers.
 
-    chdb.dbapi (chdb 4.x / CH 26.3) serialises ClickHouse ``Tuple(...)``
-    cells using list-bracket syntax — ``'[1, 2, 3]'`` — so
-    ``ast.literal_eval`` yields a Python list. That's the wrong native
-    mapping: ``Tuple`` is fixed-arity heterogeneous, the natural Python
-    counterpart is ``tuple``. Downstream code that unpacks positionally
-    via ``(a, b, c) = row['t']`` works on both, but type-annotated
-    consumers (Pydantic, dataclasses, mypy users) expect tuple.
-
-    This is the upstream chdb.dbapi gap; the shim survives until that's
-    fixed and our minimum-version floor is raised.
+    They have no effect on the converter. ClickHouse allows arbitrary
+    nesting in either order (``Nullable(LowCardinality(T))`` and
+    ``LowCardinality(Nullable(T))`` both legal), so peel in a single
+    alternating loop instead of stripping all Nullables first and then
+    all LowCardinality.
     """
-    parsed = _coerce_literal(v)
-    if isinstance(parsed, list):
-        return tuple(parsed)
-    return parsed
-
-
-def _converter_for(type_str: str) -> Callable[[Any], Any] | None:
-    """Return the column converter for a ClickHouse type string, or None.
-
-    ``None`` means "no conversion needed" — pass values through. The caller
-    avoids the dispatch overhead on identity columns.
-    """
-    # Strip outer Nullable / LowCardinality wrappers — they have no effect
-    # on the converter. ClickHouse allows arbitrary nesting in either order
-    # (``Nullable(LowCardinality(T))`` and ``LowCardinality(Nullable(T))``
-    # both legal), so peel in a single alternating loop instead of stripping
-    # all Nullables first and then all LowCardinality.
     inner = type_str
     while True:
         if inner.startswith("Nullable("):
@@ -304,10 +288,88 @@ def _converter_for(type_str: str) -> Callable[[Any], Any] | None:
         elif inner.startswith("LowCardinality("):
             inner = inner[len("LowCardinality(") : -1]
         else:
-            break
+            return inner
 
-    # Numerics
-    if inner.startswith("Decimal(") or inner.startswith("Decimal32") or inner.startswith("Decimal64") or inner.startswith("Decimal128") or inner.startswith("Decimal256"):
+
+def _split_type_args(args_str: str) -> list[str]:
+    """Split a composite type's argument list at top-level commas.
+
+    ``'Nullable(Int32), String, Map(String, Int32)'`` →
+    ``['Nullable(Int32)', 'String', 'Map(String, Int32)']``.
+
+    Paren- and quote-aware so commas inside ``Decimal(18, 2)``,
+    ``DateTime64(3, 'UTC')``, ``Enum8('a' = 1, 'b' = 2)`` or quoted
+    identifiers never split. Quoted regions honor backslash escapes
+    (``Enum8('it\\'s' = 1)``).
+    """
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    quote: str | None = None
+    i = 0
+    while i < len(args_str):
+        ch = args_str[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in ("'", "`"):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(args_str[start:i].strip())
+            start = i + 1
+        i += 1
+    tail = args_str[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _split_named_field(arg: str) -> tuple[str | None, str]:
+    """Split one Tuple/Nested argument into ``(field_name, type_str)``.
+
+    ``'a Float64'`` → ``('a', 'Float64')``; ``'Float64'`` →
+    ``(None, 'Float64')``. The field name is everything before the first
+    top-level space — unnamed elements never contain one, because spaces
+    in types like ``Decimal(18, 2)`` or ``DateTime64(3, 'UTC')`` sit
+    inside parentheses. Backquoted names (`` `my field` ``) are unquoted.
+    """
+    depth = 0
+    quote: str | None = None
+    i = 0
+    while i < len(arg):
+        ch = arg[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in ("'", "`"):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == " " and depth == 0:
+            name = arg[:i].strip().strip("`")
+            rest = arg[i + 1 :].strip()
+            if rest:
+                return name, rest
+            return None, arg
+        i += 1
+    return None, arg
+
+
+def _scalar_converter(inner: str) -> Callable[[Any], Any] | None:
+    """Leaf converter for an (already wrapper-peeled) scalar type string."""
+    if inner.startswith(("Decimal(", "Decimal32", "Decimal64", "Decimal128", "Decimal256")):
         return _coerce_decimal
     if inner.startswith("Int") or inner.startswith("UInt"):
         return _coerce_int
@@ -320,21 +382,162 @@ def _converter_for(type_str: str) -> Callable[[Any], Any] | None:
         return _coerce_datetime
     if inner == "Time" or inner.startswith("Time64"):
         return _coerce_time
-    # Tuple needs the dedicated tuple-coercer (chdb.dbapi serialises Tuples
-    # using list-bracket syntax — see _coerce_tuple). Must come before the
-    # generic composite fallback.
-    if inner.startswith("Tuple("):
-        return _coerce_tuple
-    # Point is exactly Tuple(Float64, Float64) — apply the same fix.
-    if inner == "Point":
-        return _coerce_tuple
-    # Other composites — list-like is fine.
-    if any(inner.startswith(p) for p in _COMPOSITE_PREFIXES):
-        return _coerce_literal
+    return None
+
+
+# Geo types are sugar over composites; the converter walks the equivalent
+# composite type. Containers keep their parsed (list) shape — only the
+# top-level Point column is re-wrapped as a tuple, in _converter_for.
+_GEO_EQUIVALENTS = {
+    "Point": "Tuple(Float64, Float64)",
+    "Ring": "Array(Point)",
+    "LineString": "Array(Point)",
+    "MultiLineString": "Array(Ring)",
+    "Polygon": "Array(Ring)",
+    "MultiPolygon": "Array(Polygon)",
+}
+
+
+def _element_converter(type_str: str) -> Callable[[Any], Any] | None:
+    """Converter for an *already-parsed* element of a composite cell.
+
+    chdb-core 26.5 (ClickHouse 26.5 baseline) serialises Float / Decimal /
+    temporal leaves inside ``Array`` / ``Tuple`` / ``Map`` / ``Nested``
+    cells as quoted strings — ``"['1.5', '2.5']"`` where chdb-core 26.3
+    emitted bare numerics. After :func:`_coerce_literal` parses the cell,
+    this walker re-coerces those leaves to native types, driven by the
+    column's ClickHouse type string. Container shapes are preserved
+    exactly as parsed (lists stay lists, dicts stay dicts) so the repair
+    is value-only.
+
+    Returns ``None`` when no leaf anywhere in the type needs coercion, so
+    identity composites (e.g. ``Array(String)``) skip the walk. Walkers
+    are defensive: any shape mismatch returns the value unchanged rather
+    than raising mid-fetch.
+    """
+    inner = _peel_wrappers(type_str)
+    inner = _GEO_EQUIVALENTS.get(inner, inner)
+
+    scalar = _scalar_converter(inner)
+    if scalar is not None:
+        return scalar
+
+    if inner.startswith("Array("):
+        elem = _element_converter(inner[len("Array(") : -1])
+        if elem is None:
+            return None
+
+        def _convert_array(v: Any) -> Any:
+            if isinstance(v, list):
+                return [elem(x) for x in v]
+            return v
+
+        return _convert_array
+
+    if inner.startswith("Map("):
+        args = _split_type_args(inner[len("Map(") : -1])
+        if len(args) != 2:
+            return None
+        key_conv = _element_converter(args[0])
+        val_conv = _element_converter(args[1])
+        if key_conv is None and val_conv is None:
+            return None
+        kc = key_conv or (lambda x: x)
+        vc = val_conv or (lambda x: x)
+
+        def _convert_map(v: Any) -> Any:
+            if isinstance(v, dict):
+                return {kc(k): vc(x) for k, x in v.items()}
+            return v
+
+        return _convert_map
+
+    if inner.startswith("Tuple(") or inner.startswith("Nested("):
+        is_nested = inner.startswith("Nested(")
+        body = inner[len("Nested(") : -1] if is_nested else inner[len("Tuple(") : -1]
+        field_convs: list[Callable[[Any], Any] | None] = []
+        named_convs: dict[str, Callable[[Any], Any]] = {}
+        for arg in _split_type_args(body):
+            name, field_type = _split_named_field(arg)
+            conv = _element_converter(field_type)
+            field_convs.append(conv)
+            if name is not None and conv is not None:
+                named_convs[name] = conv
+        if not any(c is not None for c in field_convs):
+            return None
+
+        def _convert_record(v: Any) -> Any:
+            # chdb serialises unnamed Tuple cells with list brackets and
+            # named Tuple cells as dicts keyed by field name.
+            if isinstance(v, dict):
+                return {k: named_convs[k](x) if k in named_convs else x for k, x in v.items()}
+            if isinstance(v, (list, tuple)) and len(v) == len(field_convs):
+                out = [c(x) if c is not None else x for c, x in zip(field_convs, v)]
+                return tuple(out) if isinstance(v, tuple) else out
+            return v
+
+        if not is_nested:
+            return _convert_record
+
+        # A Nested(...) cell is a list of records (one per nested row).
+        def _convert_nested(v: Any) -> Any:
+            if isinstance(v, list):
+                return [_convert_record(x) for x in v]
+            return v
+
+        return _convert_nested
+
+    return None
+
+
+def _converter_for(type_str: str) -> Callable[[Any], Any] | None:
+    """Return the column converter for a ClickHouse type string, or None.
+
+    ``None`` means "no conversion needed" — pass values through. The caller
+    avoids the dispatch overhead on identity columns.
+    """
+    inner = _peel_wrappers(type_str)
+
+    scalar = _scalar_converter(inner)
+    if scalar is not None:
+        return scalar
+
+    # Tuple cells arrive as repr-style strings; chdb.dbapi serialises
+    # unnamed Tuples with list-bracket syntax ('[1, 2, 3]') and named
+    # Tuples as dicts. The natural Python counterpart of a fixed-arity
+    # heterogeneous Tuple is tuple, so re-wrap the list form. Point is
+    # exactly Tuple(Float64, Float64) — same treatment.
+    if inner.startswith("Tuple(") or inner == "Point":
+        elem = _element_converter(inner)
+
+        def _convert_tuple_cell(v: Any) -> Any:
+            parsed = _coerce_literal(v)
+            if elem is not None:
+                parsed = elem(parsed)
+            if isinstance(parsed, list):
+                return tuple(parsed)
+            return parsed
+
+        return _convert_tuple_cell
+
+    # Other composites and the list-shaped geo aliases: parse the
+    # repr-style string, then repair quoted numeric/temporal leaves.
+    if (
+        any(inner.startswith(p) for p in _COMPOSITE_PREFIXES)
+        or inner in _GEO_EQUIVALENTS
+    ):
+        elem = _element_converter(inner)
+        if elem is None:
+            return _coerce_literal
+
+        def _convert_composite_cell(v: Any) -> Any:
+            return elem(_coerce_literal(v))
+
+        return _convert_composite_cell
+
+    # JSON values are dynamically typed per path — the column type string
+    # carries no leaf info, so parse the cell shape and leave leaves alone.
     if inner == "JSON" or inner.startswith("JSON(") or inner.startswith("Object("):
-        return _coerce_literal
-    # Geo aliases that unwrap to Array-of-X are list-shaped, not tuple-shaped.
-    if inner in ("Ring", "Polygon", "MultiPolygon"):
         return _coerce_literal
     return None
 

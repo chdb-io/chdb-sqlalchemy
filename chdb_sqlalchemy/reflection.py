@@ -28,6 +28,53 @@ if TYPE_CHECKING:
     from .dialect import ChdbDialect
 
 
+def _strip_outer_parens(expr: str) -> str:
+    """Strip parens that wrap the *entire* expression: ``(user_id)`` → ``user_id``.
+
+    ClickHouse 26.3 normalised a parenthesized single-column key away in
+    ``system.tables.sorting_key`` (``ORDER BY (user_id)`` was reported as
+    ``user_id``); 26.5 preserves the wrapping parens. Reflection must
+    return bare column names either way. Only a pair that stays open
+    across the whole string is stripped — ``(a) + (b)`` is untouched.
+    Quote-aware so a paren inside a string literal or backquoted
+    identifier never miscounts.
+    """
+    expr = expr.strip()
+    while expr.startswith("(") and expr.endswith(")"):
+        depth = 0
+        in_squote = False
+        in_bquote = False
+        wraps = True
+        i = 0
+        while i < len(expr):
+            ch = expr[i]
+            if in_squote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == "'":
+                    in_squote = False
+            elif in_bquote:
+                if ch == "`":
+                    in_bquote = False
+            elif ch == "'":
+                in_squote = True
+            elif ch == "`":
+                in_bquote = True
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(expr) - 1:
+                    wraps = False
+                    break
+            i += 1
+        if not wraps:
+            return expr
+        expr = expr[1:-1].strip()
+    return expr
+
+
 def _split_sorting_key(sorting_key: str) -> list[str]:
     """Split a ClickHouse ``ORDER BY`` / sorting-key expression list by commas.
 
@@ -36,6 +83,7 @@ def _split_sorting_key(sorting_key: str) -> list[str]:
     Track paren depth and quote state so commas inside ``(...)`` /
     ``'...'`` are not treated as separators.
     """
+    sorting_key = _strip_outer_parens(sorting_key)
     parts: list[str] = []
     buf: list[str] = []
     depth = 0

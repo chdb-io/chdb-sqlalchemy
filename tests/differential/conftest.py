@@ -37,7 +37,7 @@ def _have_clickhouse_binary() -> bool:
 
 @pytest.fixture(scope="session")
 def clickhouse_local() -> ClickHouseLocal:
-    """Subprocess-backed reference ClickHouse 26.3.9 (LTS).
+    """Subprocess-backed reference ClickHouse 26.5.1 (stable).
 
     Returns a callable wrapper that runs ``clickhouse local --query``
     with a session-persistent in-memory database. Skipped automatically
