@@ -27,6 +27,24 @@ registry.register("chdb", "chdb_sqlalchemy.dialect", "ChdbDialect")
 registry.register("chdb.dbapi", "chdb_sqlalchemy.dialect", "ChdbDialect")
 
 
+# Pre-register markers that SA's testing plugin attaches dynamically — some at
+# import time via ``config.add_to_marker.<name>`` (mypy / *_intensive), others
+# during collection via ``test_class.add_marker(...)`` (backend variants).
+# Under pytest 9 with ``--strict-markers`` (set in the root pyproject.toml
+# addopts), the lookup fails before SA's session-start hook can register them
+# itself, breaking the whole suite.
+def pytest_configure(config: pytest.Config) -> None:
+    for marker in (
+        "mypy",
+        "memory_intensive",
+        "timing_intensive",
+        "backend",
+        "sparse_backend",
+        "sparse_driver_backend",
+    ):
+        config.addinivalue_line("markers", f"{marker}: SQLAlchemy testing marker")
+
+
 # ---------------------------------------------------------------------------
 # Skip list — SA tests whose generic assumptions fundamentally clash with
 # chDB / chdb.dbapi behaviour and that can't be gated via the
