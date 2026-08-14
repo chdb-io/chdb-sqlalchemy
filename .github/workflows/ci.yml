@@ -134,25 +134,38 @@ jobs:
     # The differential conftest spawns ``clickhouse local`` as a subprocess
     # and expects a binary at the repo root (see tests/differential/conftest.py).
     # We extract that binary from the clickhouse-server Docker image rather
-    # than running the image as a network service so the version is pinned
-    # to the same patch as the chDB Docker image (and the same one this
-    # dialect's docs claim parity against).
+    # than running the image as a network service. The tag is derived from
+    # the installed chDB core's own SELECT version() output so dependency
+    # bumps do not leave the reference binary on an older ClickHouse line.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,test-differential]"
+      - name: Detect chDB ClickHouse version
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import chdb
+
+          version = str(chdb.query("SELECT version()", "TabSeparated")).strip()
+          parts = version.split(".")
+          if len(parts) < 3:
+              raise SystemExit(f"unexpected chDB ClickHouse version: {version!r}")
+
+          print(f"CHDB_CLICKHOUSE_VERSION={version}")
+          print(f"CLICKHOUSE_TAG_PATCH={'.'.join(parts[:3])}")
+          print(f"CLICKHOUSE_TAG_MINOR={'.'.join(parts[:2])}")
+          PY
       - name: Extract clickhouse binary from server image
         run: |
-          # The tag must track chdb-core's ClickHouse baseline (26.5.1 as
-          # of chdb-core 26.5.0) — the differential test's own version
-          # check ([:3] of version()) fails loudly on drift, so a chdb
-          # baseline bump shows up here as a red version-skew test, not a
-          # silent pass. Try tags from most-specific to least-specific:
-          # patch tags (``X.Y.Z.W``) may rotate out, so fall back to the
-          # rolling ``X.Y.Z`` / ``X.Y`` tags.
+          # Try tags from most-specific to least-specific. Patch tags can
+          # rotate out, so fall back to the rolling X.Y tag for the same
+          # ClickHouse minor line.
           set -e
-          for tag in "26.5.1.882" "26.5.1" "26.5"; do
+          for tag in "$CLICKHOUSE_TAG_PATCH" "$CLICKHOUSE_TAG_MINOR"; do
             if docker pull "clickhouse/clickhouse-server:$tag" 2>/dev/null; then
               echo "Using clickhouse/clickhouse-server:$tag"
               docker create --name ch-extract "clickhouse/clickhouse-server:$tag"
@@ -163,9 +176,6 @@ jobs:
               exit 0
             fi
           done
-          echo "ERROR: no usable clickhouse-server tag found on Docker Hub"
+          echo "ERROR: no usable clickhouse-server tag found on Docker Hub for chDB $CHDB_CLICKHOUSE_VERSION"
           exit 1
-      - run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,test-differential]"
       - run: pytest -ra -m differential tests/differential

@@ -1,9 +1,9 @@
-"""L5 — Differential testing: chDB vs ClickHouse 26.5.1 (stable) reference.
+"""L5 — Differential testing: chDB vs the matching ClickHouse reference.
 
 For each query in :data:`QUERY_CORPUS`, we run it twice:
 
 1. Through our SQLAlchemy dialect against the chDB engine
-2. Directly through ``clickhouse local`` (the same v26.5.1.x build,
+2. Directly through ``clickhouse local`` (the same major.minor.patch line,
    non-embedded)
 
 …then compare the row-string output. Mismatches are classified into
@@ -284,7 +284,7 @@ def test_chdb_matches_reference(
 
 
 def test_version_strings_are_compatible(clickhouse_local, chdb_seeded_engine):
-    """Sanity check: chDB and the reference binary track the same 26.5.1 patch line.
+    """Sanity check: chDB and the reference binary track the same patch line.
 
     A real version mismatch (e.g. reference downloaded as 26.4.x by accident,
     or chDB diverging onto a later patch series) would invalidate every
