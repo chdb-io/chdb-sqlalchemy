@@ -83,7 +83,13 @@ class ClickHouseLocal:
         :param path: Optional persistent ``--path`` directory. By default
             ``clickhouse local`` uses an ephemeral temp dir per process.
         """
-        args = [self.binary, "local", "--query", sql, "--format", fmt]
+        # Select the output format in SQL rather than with the CLI's generic
+        # ``--format`` option.  Since ClickHouse 26.9, that option also selects
+        # the INSERT input format, causing inline ``VALUES`` tuples in the seed
+        # script to be parsed as TSV.  The SQL FORMAT clause works on both the
+        # old 26.5 baseline and current releases.
+        formatted_sql = f"{sql.rstrip().rstrip(';')} FORMAT {fmt}"
+        args = [self.binary, "local", "--query", formatted_sql]
         if path is not None:
             args += ["--path", path]
         proc = subprocess.run(
